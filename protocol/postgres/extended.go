@@ -15,9 +15,9 @@ import (
 // needs: named prepared statements and bound portals. A Simple Query ('Q')
 // borrows the same senders but keeps no state.
 type session struct {
-	ctx    context.Context
-	c      *wireConn
-	engine core.Engine
+	ctx context.Context
+	c   *wireConn
+	db  core.Session // this client's dedicated engine connection
 
 	prepared map[string]*prepared
 	portals  map[string]*portal
@@ -49,11 +49,11 @@ type portal struct {
 	formats []int // result-column format codes from Bind
 }
 
-func newSession(ctx context.Context, c *wireConn, engine core.Engine) *session {
+func newSession(ctx context.Context, c *wireConn, db core.Session) *session {
 	return &session{
 		ctx:      ctx,
 		c:        c,
-		engine:   engine,
+		db:       db,
 		prepared: map[string]*prepared{},
 		portals:  map[string]*portal{},
 	}
@@ -64,14 +64,14 @@ func (s *session) exec(sql string, args []core.Value) (*core.ResultSet, error) {
 	if s.tx != nil {
 		return s.tx.Execute(s.ctx, sql, args)
 	}
-	return s.engine.Execute(s.ctx, sql, args)
+	return s.db.Execute(s.ctx, sql, args)
 }
 
 func (s *session) describeSQL(sql string, args []core.Value) ([]core.Column, error) {
 	if s.tx != nil {
 		return s.tx.Describe(s.ctx, sql, args)
 	}
-	return s.engine.Describe(s.ctx, sql, args)
+	return s.db.Describe(s.ctx, sql, args)
 }
 
 // readyForQuery reports the transaction status: 'I' idle, 'T' in a transaction,
@@ -93,7 +93,7 @@ func (s *session) applyTxControl(kind string) (string, error) {
 	switch kind {
 	case "BEGIN":
 		if s.tx == nil {
-			tx, err := s.engine.Begin(s.ctx)
+			tx, err := s.db.Begin(s.ctx)
 			if err != nil {
 				return "BEGIN", err
 			}

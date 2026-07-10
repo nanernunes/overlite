@@ -72,7 +72,7 @@ func (s *session) trySchemaDDL(sql string) (tag string, handled bool, err error)
 	if len(fields) < 3 || !strings.EqualFold(fields[1], "schema") {
 		return "", false, nil
 	}
-	sm, ok := s.engine.(core.SchemaManager)
+	sm, ok := s.db.(core.SchemaManager)
 	if !ok {
 		return "", false, nil
 	}

@@ -90,7 +90,7 @@ for a real production system**. ✅ done · 🟡 partial · ⬜ not yet.
 | COPY / bulk load | ✅ | `FROM STDIN` / `TO STDOUT`, `\copy` (text & CSV) |
 | Introspection | ✅ | `pg_catalog` + `information_schema` (psql `\dt`/`\d`/`\l`, GUIs) |
 | Authentication | 🟡 | trust + `POSTGRES_PASSWORD`; **no SCRAM-SHA-256, no TLS** |
-| Concurrency | 🟡 | reads are fine, but a write/tx serializes other clients |
+| Concurrency | ✅ | dedicated connection per client; reads run in parallel, writes serialize (SQLite single-writer) |
 | Migrations (`ALTER TABLE`) | 🟡 | add/drop/rename column; no `ALTER COLUMN TYPE` / `ADD CONSTRAINT` |
 | Numeric precision | 🟡 | SQLite affinity; not exact fixed-point (money) |
 | Timestamps with time zone | 🟡 | stored as text; no real `timestamptz` / tz math |

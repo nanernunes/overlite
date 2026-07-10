@@ -132,7 +132,7 @@ func (s *session) copyOut(cs *copyStmt) error {
 func (s *session) copyIn(cs *copyStmt) error {
 	cols := cs.columns
 	if len(cols) == 0 {
-		describe, err := s.engine.Describe(s.ctx, "SELECT * FROM "+rewrite(cs.table), nil)
+		describe, err := s.db.Describe(s.ctx, "SELECT * FROM "+rewrite(cs.table), nil)
 		if err != nil {
 			return s.c.sendError("42000", err.Error())
 		}
@@ -191,7 +191,7 @@ func (s *session) copyInsert(cs *copyStmt, cols []string, data []byte) (int, err
 	ownTx := s.tx == nil
 	var tx core.Tx
 	if ownTx {
-		if tx, err = s.engine.Begin(s.ctx); err != nil {
+		if tx, err = s.db.Begin(s.ctx); err != nil {
 			return 0, err
 		}
 		exec = func(sql string, args []core.Value) (*core.ResultSet, error) {

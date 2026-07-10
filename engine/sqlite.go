@@ -22,14 +22,21 @@ import (
 // local to this process and access is serialized through it.
 type SQLite struct {
 	db       *sql.DB
-	mainPath string // path of the "public" schema file (or ":memory:")
+	conn     *sql.Conn // default connection for the engine's own methods
+	mainPath string    // path of the "public" schema file (or ":memory:")
 }
 
+// maxConnections caps concurrent client sessions (each pins one connection),
+// mirroring PostgreSQL's default max_connections.
+const maxConnections = 100
+
 // Open opens (creating if needed) a SQLite database at path. Use ":memory:"
-// for an ephemeral in-memory database (shared across pool connections).
+// for an ephemeral in-memory database.
 //
 // WAL + a busy timeout are enabled so concurrent readers don't block and
-// writers wait politely instead of erroring with SQLITE_BUSY.
+// writers wait politely instead of erroring with SQLITE_BUSY. Each client gets
+// a dedicated connection (see Session), so reads run in parallel and one
+// client's transaction doesn't block the others.
 func Open(path string) (*SQLite, error) {
 	registerCatalog()
 	// Set before the first connection: the catalog is built in a connection
@@ -40,16 +47,51 @@ func Open(path string) (*SQLite, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite %q: %w", path, err)
 	}
-	// Schemas map to ATTACHed database files and the catalog is built from
-	// per-connection TEMP views; pinning to a single connection keeps ATTACH
-	// state and those views consistent (writes serialize on SQLite regardless).
-	db.SetMaxOpenConns(1)
-	if err := db.PingContext(context.Background()); err != nil {
+	db.SetMaxOpenConns(maxConnections)
+	// Don't pool idle connections: each new session gets a fresh connection
+	// that (re)discovers schemas and rebuilds its catalog on connect, so a
+	// reused connection never carries stale ATTACH/temp-view state.
+	db.SetMaxIdleConns(0)
+
+	// A dedicated connection for the engine's own methods (used directly in
+	// tests and by CREATE/DROP SCHEMA at the engine level).
+	conn, err := db.Conn(context.Background())
+	if err != nil {
 		db.Close()
-		return nil, fmt.Errorf("ping sqlite %q: %w", path, err)
+		return nil, fmt.Errorf("open sqlite %q: %w", path, err)
 	}
-	return &SQLite{db: db, mainPath: path}, nil
+	return &SQLite{db: db, conn: conn, mainPath: path}, nil
 }
+
+// Session pins a dedicated connection for one client. Implements core.Engine.
+func (s *SQLite) Session(ctx context.Context) (core.Session, error) {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &sqliteSession{conn: conn, mainPath: s.mainPath}, nil
+}
+
+// sqliteSession is one client's dedicated connection.
+type sqliteSession struct {
+	conn     *sql.Conn
+	mainPath string
+}
+
+func (ss *sqliteSession) Execute(ctx context.Context, sql string, args []core.Value) (*core.ResultSet, error) {
+	return execute(ctx, ss.conn, sql, args)
+}
+func (ss *sqliteSession) Describe(ctx context.Context, sql string, args []core.Value) ([]core.Column, error) {
+	return describe(ctx, ss.conn, sql, args)
+}
+func (ss *sqliteSession) Begin(ctx context.Context) (core.Tx, error) {
+	tx, err := ss.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	return &sqliteTx{tx: tx}, nil
+}
+func (ss *sqliteSession) Close() error { return ss.conn.Close() }
 
 func buildDSN(path string) string {
 	// modernc reads pragmas from the DSN query string.
@@ -72,15 +114,15 @@ type querier interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
 
-// Execute implements core.Engine.
+// Execute runs a statement on the engine's own connection (used by tests and
+// convenience code; clients use Session).
 func (s *SQLite) Execute(ctx context.Context, query string, args []core.Value) (*core.ResultSet, error) {
-	return execute(ctx, s.db, query, args)
+	return execute(ctx, s.conn, query, args)
 }
 
-// Begin implements core.Engine. With a single pooled connection, the returned
-// transaction pins it, so concurrent transactions serialize.
+// Begin starts a transaction on the engine's own connection.
 func (s *SQLite) Begin(ctx context.Context) (core.Tx, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.conn.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -169,7 +211,7 @@ func doExec(ctx context.Context, q querier, query string, args []core.Value, cmd
 // producing rows and without any side effect. For mutations with RETURNING it
 // introspects a read-only projection instead of running the mutation.
 func (s *SQLite) Describe(ctx context.Context, query string, args []core.Value) ([]core.Column, error) {
-	return describe(ctx, s.db, query, args)
+	return describe(ctx, s.conn, query, args)
 }
 
 func describe(ctx context.Context, q querier, query string, args []core.Value) ([]core.Column, error) {
@@ -216,7 +258,10 @@ func columnType(types []*sql.ColumnType, i int) string {
 	return ""
 }
 
-func (s *SQLite) Close() error { return s.db.Close() }
+func (s *SQLite) Close() error {
+	s.conn.Close()
+	return s.db.Close()
+}
 
 // isQuery reports whether a statement is expected to return rows. It is a
 // deliberately small heuristic; the protocol layer never has to know SQL.

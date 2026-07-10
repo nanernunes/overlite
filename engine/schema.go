@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -184,11 +185,21 @@ func viewName(createStmt string) string {
 	return ""
 }
 
-// --- engine methods -----------------------------------------------------------
+// --- schema management --------------------------------------------------------
+//
+// Schema DDL runs on a single connection (the engine's own, or a client
+// session's), attaching/detaching the schema file and rebuilding that
+// connection's catalog. Other connections pick the change up when they next
+// connect (their hook re-discovers schema files from disk).
 
-// CreateSchema creates and attaches a new schema-backing database file, then
-// rebuilds the catalog so it becomes visible.
-func (s *SQLite) CreateSchema(ctx context.Context, name string, ifNotExists bool) error {
+// connExecutor is what schema management needs from a *sql.Conn (or *sql.DB).
+type connExecutor interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+func createSchema(ctx context.Context, ce connExecutor, mainPath, name string, ifNotExists bool) error {
 	if strings.EqualFold(name, "public") {
 		if ifNotExists {
 			return nil
@@ -198,29 +209,27 @@ func (s *SQLite) CreateSchema(ctx context.Context, name string, ifNotExists bool
 	if !validSchemaName(name) {
 		return fmt.Errorf("invalid schema name %q", name)
 	}
-	if s.mainPath == "" || s.mainPath == ":memory:" {
+	if mainPath == "" || mainPath == ":memory:" {
 		return fmt.Errorf("schemas require an on-disk database")
 	}
-	if s.schemaAttached(ctx, name) {
+	if schemaAttached(ctx, ce, name) {
 		if ifNotExists {
 			return nil
 		}
 		return fmt.Errorf("schema %q already exists", name)
 	}
-	path := schemaFilePath(s.mainPath, name)
-	if _, err := s.db.ExecContext(ctx, fmt.Sprintf("ATTACH DATABASE '%s' AS %q", path, name)); err != nil {
+	path := schemaFilePath(mainPath, name)
+	if _, err := ce.ExecContext(ctx, fmt.Sprintf("ATTACH DATABASE '%s' AS %q", path, name)); err != nil {
 		return err
 	}
-	return s.rebuildCatalog(ctx)
+	return rebuildCatalog(ctx, ce, mainPath)
 }
 
-// DropSchema detaches a schema and removes its file. Without cascade it refuses
-// to drop a schema that still has tables.
-func (s *SQLite) DropSchema(ctx context.Context, name string, ifExists, cascade bool) error {
+func dropSchema(ctx context.Context, ce connExecutor, mainPath, name string, ifExists, cascade bool) error {
 	if strings.EqualFold(name, "public") {
 		return fmt.Errorf("cannot drop schema %q", name)
 	}
-	if !s.schemaAttached(ctx, name) {
+	if !schemaAttached(ctx, ce, name) {
 		if ifExists {
 			return nil
 		}
@@ -228,37 +237,37 @@ func (s *SQLite) DropSchema(ctx context.Context, name string, ifExists, cascade 
 	}
 	if !cascade {
 		var n int
-		s.db.QueryRowContext(ctx, fmt.Sprintf(
+		ce.QueryRowContext(ctx, fmt.Sprintf(
 			`SELECT count(*) FROM %q.sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%%'`, name)).Scan(&n)
 		if n > 0 {
 			return fmt.Errorf("schema %q is not empty (use CASCADE)", name)
 		}
 	}
-	path := schemaFilePath(s.mainPath, name)
-	if _, err := s.db.ExecContext(ctx, fmt.Sprintf("DETACH DATABASE %q", name)); err != nil {
+	path := schemaFilePath(mainPath, name)
+	if _, err := ce.ExecContext(ctx, fmt.Sprintf("DETACH DATABASE %q", name)); err != nil {
 		return err
 	}
 	_ = os.Remove(path)
 	_ = os.Remove(path + "-wal")
 	_ = os.Remove(path + "-shm")
-	return s.rebuildCatalog(ctx)
+	return rebuildCatalog(ctx, ce, mainPath)
 }
 
-func (s *SQLite) schemaAttached(ctx context.Context, name string) bool {
+func schemaAttached(ctx context.Context, ce connExecutor, name string) bool {
 	var found string
-	err := s.db.QueryRowContext(ctx,
+	err := ce.QueryRowContext(ctx,
 		"SELECT name FROM pragma_database_list WHERE name = ?", name).Scan(&found)
 	return err == nil
 }
 
-// rebuildCatalog re-runs the catalog setup on the (single) connection.
-func (s *SQLite) rebuildCatalog(ctx context.Context) error {
+// rebuildCatalog re-runs the catalog setup on the given connection.
+func rebuildCatalog(ctx context.Context, ce connExecutor, mainPath string) error {
 	exec := func(q string) error {
-		_, err := s.db.ExecContext(ctx, q)
+		_, err := ce.ExecContext(ctx, q)
 		return err
 	}
 	q := func(query string) ([]string, error) {
-		rows, err := s.db.QueryContext(ctx, query)
+		rows, err := ce.QueryContext(ctx, query)
 		if err != nil {
 			return nil, err
 		}
@@ -273,5 +282,21 @@ func (s *SQLite) rebuildCatalog(ctx context.Context) error {
 		}
 		return out, rows.Err()
 	}
-	return setupConnection(ctx, exec, q, s.mainPath)
+	return setupConnection(ctx, exec, q, mainPath)
+}
+
+// CreateSchema / DropSchema on the engine's own connection (tests, convenience).
+func (s *SQLite) CreateSchema(ctx context.Context, name string, ifNotExists bool) error {
+	return createSchema(ctx, s.conn, s.mainPath, name, ifNotExists)
+}
+func (s *SQLite) DropSchema(ctx context.Context, name string, ifExists, cascade bool) error {
+	return dropSchema(ctx, s.conn, s.mainPath, name, ifExists, cascade)
+}
+
+// CreateSchema / DropSchema on a client session's connection.
+func (ss *sqliteSession) CreateSchema(ctx context.Context, name string, ifNotExists bool) error {
+	return createSchema(ctx, ss.conn, ss.mainPath, name, ifNotExists)
+}
+func (ss *sqliteSession) DropSchema(ctx context.Context, name string, ifExists, cascade bool) error {
+	return dropSchema(ctx, ss.conn, ss.mainPath, name, ifExists, cascade)
 }

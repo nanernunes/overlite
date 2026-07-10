@@ -51,7 +51,16 @@ func (p *Protocol) Serve(ctx context.Context, conn net.Conn, engine core.Engine)
 		return err
 	}
 
-	s := newSession(ctx, c, engine)
+	// A dedicated engine connection per client, so clients run concurrently.
+	db, err := engine.Session(ctx)
+	if err != nil {
+		_ = c.sendFatal("53300", "too many connections: "+err.Error())
+		_ = c.flush()
+		return err
+	}
+	defer db.Close()
+
+	s := newSession(ctx, c, db)
 	return s.loop()
 }
 

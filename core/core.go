@@ -44,25 +44,36 @@ type ResultSet struct {
 // Engine is the storage abstraction. Today the only implementation is SQLite,
 // but the protocols depend on this interface, never on a concrete engine.
 type Engine interface {
+	// Session pins a dedicated connection for the lifetime of one client, so
+	// clients run concurrently (reads in parallel; writes serialize at the
+	// storage layer) and a transaction on one doesn't block the others. The
+	// caller must Close it when the client disconnects.
+	Session(ctx context.Context) (Session, error)
+
+	Close() error
+}
+
+// Session is one client's private handle on the storage, backed by a dedicated
+// connection. Statements run on that connection.
+type Session interface {
 	// Execute runs a single SQL statement and returns its result. args are
 	// bound positionally; pass nil when there are none.
 	Execute(ctx context.Context, sql string, args []Value) (*ResultSet, error)
 
-	// Describe returns the output columns of a query without returning its
-	// rows, for protocols (e.g. Postgres extended query) that must advertise a
-	// row description before execution. It returns nil columns for statements
-	// that produce no rows. args supplies placeholder values (may be nil); it
-	// only affects introspection, never mutates data.
+	// Describe returns a query's output columns without returning its rows, for
+	// protocols (e.g. Postgres extended query) that must advertise a row
+	// description before execution. It returns nil columns for statements that
+	// produce no rows. args supplies placeholder values (may be nil); it only
+	// affects introspection, never mutates data.
 	Describe(ctx context.Context, sql string, args []Value) ([]Column, error)
 
-	// Begin starts a transaction. Statements run through the returned Tx are
-	// atomic; the engine may serialize concurrent transactions.
+	// Begin starts a transaction on this session's connection.
 	Begin(ctx context.Context) (Tx, error)
 
 	Close() error
 }
 
-// Tx is an in-progress transaction. Execute/Describe behave like the engine's
+// Tx is an in-progress transaction. Execute/Describe behave like the session's
 // but run within the transaction.
 type Tx interface {
 	Execute(ctx context.Context, sql string, args []Value) (*ResultSet, error)
