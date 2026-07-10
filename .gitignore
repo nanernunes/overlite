@@ -1,0 +1,10 @@
+# build output
+bin/
+
+# runtime SQLite databases (incl. WAL/SHM sidecars and schema files)
+*.db
+*.db-wal
+*.db-shm
+
+# internal coverage tracker
+COVERAGE.md

@@ -1,0 +1,586 @@
+package postgres
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"io"
+	"net"
+	"strings"
+
+	"overlite/core"
+)
+
+// session holds the per-connection state that the Extended Query protocol
+// needs: named prepared statements and bound portals. A Simple Query ('Q')
+// borrows the same senders but keeps no state.
+type session struct {
+	ctx    context.Context
+	c      *wireConn
+	engine core.Engine
+
+	prepared map[string]*prepared
+	portals  map[string]*portal
+
+	// failed is set when a message in an extended request cycle errors; the
+	// rest of the cycle is skipped until the next Sync, per the protocol.
+	failed bool
+
+	// tx is the current transaction (nil = autocommit). txFailed marks it as
+	// aborted: further statements are rejected until COMMIT/ROLLBACK.
+	tx       core.Tx
+	txFailed bool
+}
+
+type prepared struct {
+	sql       string // rewritten, ready for the engine
+	numParams int
+	// util is set for intercepted statements (SET/SHOW/...) that bypass the
+	// engine and return a synthetic result.
+	util *core.ResultSet
+	// txControl is "BEGIN"/"COMMIT"/"ROLLBACK" for transaction-control
+	// statements, else "".
+	txControl string
+}
+
+type portal struct {
+	prep    *prepared
+	params  []core.Value
+	formats []int // result-column format codes from Bind
+}
+
+func newSession(ctx context.Context, c *wireConn, engine core.Engine) *session {
+	return &session{
+		ctx:      ctx,
+		c:        c,
+		engine:   engine,
+		prepared: map[string]*prepared{},
+		portals:  map[string]*portal{},
+	}
+}
+
+// exec runs a statement in the current transaction, or autocommit if none.
+func (s *session) exec(sql string, args []core.Value) (*core.ResultSet, error) {
+	if s.tx != nil {
+		return s.tx.Execute(s.ctx, sql, args)
+	}
+	return s.engine.Execute(s.ctx, sql, args)
+}
+
+func (s *session) describeSQL(sql string, args []core.Value) ([]core.Column, error) {
+	if s.tx != nil {
+		return s.tx.Describe(s.ctx, sql, args)
+	}
+	return s.engine.Describe(s.ctx, sql, args)
+}
+
+// readyForQuery reports the transaction status: 'I' idle, 'T' in a transaction,
+// 'E' in a failed (aborted) transaction.
+func (s *session) readyForQuery() error {
+	status := byte('I')
+	if s.tx != nil {
+		if s.txFailed {
+			status = 'E'
+		} else {
+			status = 'T'
+		}
+	}
+	return s.c.send(msgReadyForQuery, []byte{status})
+}
+
+// applyTxControl performs BEGIN/COMMIT/ROLLBACK and returns the command tag.
+func (s *session) applyTxControl(kind string) (string, error) {
+	switch kind {
+	case "BEGIN":
+		if s.tx == nil {
+			tx, err := s.engine.Begin(s.ctx)
+			if err != nil {
+				return "BEGIN", err
+			}
+			s.tx = tx
+			s.txFailed = false
+		}
+		return "BEGIN", nil
+	case "COMMIT":
+		return "COMMIT", s.endTx(true)
+	case "ROLLBACK":
+		return "ROLLBACK", s.endTx(false)
+	}
+	return "", nil
+}
+
+// endTx commits (or rolls back) the current transaction and clears state. A
+// failed transaction always rolls back, even on COMMIT.
+func (s *session) endTx(commit bool) error {
+	if s.tx == nil {
+		return nil // no transaction in progress; harmless no-op
+	}
+	tx := s.tx
+	s.tx = nil
+	failed := s.txFailed
+	s.txFailed = false
+	if commit && !failed {
+		return tx.Commit()
+	}
+	return tx.Rollback()
+}
+
+// abortedTxError guards statements issued while a transaction is aborted.
+func (s *session) abortedTxError() bool { return s.tx != nil && s.txFailed }
+
+// loop reads and dispatches frontend messages until the client disconnects.
+func (s *session) loop() error {
+	// A client that drops mid-transaction leaves it uncommitted; roll it back.
+	defer func() {
+		if s.tx != nil {
+			_ = s.tx.Rollback()
+			s.tx = nil
+		}
+	}()
+
+	for {
+		typ, body, err := s.c.readMessage()
+		if err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+				return nil
+			}
+			return err
+		}
+
+		switch typ {
+		case msgQuery:
+			s.failed = false
+			if err := s.handleSimpleQuery(body); err != nil {
+				return err
+			}
+			if err := s.readyForQuery(); err != nil {
+				return err
+			}
+			if err := s.c.flush(); err != nil {
+				return err
+			}
+
+		case msgParse, msgBind, msgDescribe, msgExecute, msgClose:
+			// Extended request cycle: buffer responses, no ReadyForQuery until
+			// Sync. Skip the rest of a failed cycle.
+			if s.failed {
+				continue
+			}
+			if err := s.dispatchExtended(typ, body); err != nil {
+				return err
+			}
+
+		case msgSync:
+			s.failed = false
+			if err := s.readyForQuery(); err != nil {
+				return err
+			}
+			if err := s.c.flush(); err != nil {
+				return err
+			}
+
+		case msgFlush:
+			if err := s.c.flush(); err != nil {
+				return err
+			}
+
+		case msgTerminate:
+			return nil
+
+		default:
+			if err := s.protoError("0A000", "unsupported message '"+string(typ)+"'"); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+func (s *session) dispatchExtended(typ byte, body []byte) error {
+	switch typ {
+	case msgParse:
+		return s.handleParse(body)
+	case msgBind:
+		return s.handleBind(body)
+	case msgDescribe:
+		return s.handleDescribe(body)
+	case msgExecute:
+		return s.handleExecute(body)
+	case msgClose:
+		return s.handleClose(body)
+	}
+	return nil
+}
+
+// protoError reports a per-cycle error and arms the skip-until-Sync flag. It
+// returns a non-nil error only if writing the ErrorResponse itself failed.
+func (s *session) protoError(code, msg string) error {
+	s.failed = true
+	return s.c.sendError(code, msg)
+}
+
+func (s *session) handleParse(body []byte) error {
+	r := newReader(body)
+	name := r.cstring()
+	query := r.cstring()
+	nOIDs := r.int16()
+	for i := 0; i < nOIDs; i++ {
+		r.int32() // client-supplied type hints; ignored (we advertise text)
+	}
+	if r.err != nil {
+		return s.protoError("08P01", "malformed Parse message")
+	}
+
+	raw := trimStatement(query)
+	if kind := txControlKind(raw); kind != "" {
+		s.prepared[name] = &prepared{txControl: kind}
+		return s.c.send(msgParseComplete, nil)
+	}
+	if rs, ok := interceptUtility(raw); ok {
+		s.prepared[name] = &prepared{util: rs}
+		return s.c.send(msgParseComplete, nil)
+	}
+	sql := rewrite(raw)
+	s.prepared[name] = &prepared{sql: sql, numParams: countParams(sql)}
+	return s.c.send(msgParseComplete, nil)
+}
+
+func (s *session) handleBind(body []byte) error {
+	r := newReader(body)
+	portalName := r.cstring()
+	stmtName := r.cstring()
+
+	nFmt := r.int16()
+	fmts := make([]int, nFmt)
+	for i := range fmts {
+		fmts[i] = r.int16()
+	}
+
+	nParams := r.int16()
+	params := make([]core.Value, nParams)
+	for i := 0; i < nParams; i++ {
+		length := r.int32()
+		if length == -1 {
+			params[i] = nil
+			continue
+		}
+		params[i] = decodeParam(formatFor(fmts, i), r.bytes(length))
+	}
+
+	nResFmt := r.int16()
+	resFmts := make([]int, nResFmt)
+	for i := range resFmts {
+		resFmts[i] = r.int16()
+	}
+	if r.err != nil {
+		return s.protoError("08P01", "malformed Bind message")
+	}
+
+	prep := s.prepared[stmtName]
+	if prep == nil {
+		return s.protoError("26000", "unknown prepared statement "+quoteName(stmtName))
+	}
+	s.portals[portalName] = &portal{prep: prep, params: params, formats: resFmts}
+	return s.c.send(msgBindComplete, nil)
+}
+
+func (s *session) handleDescribe(body []byte) error {
+	r := newReader(body)
+	kind := r.byte()
+	name := r.cstring()
+	if r.err != nil {
+		return s.protoError("08P01", "malformed Describe message")
+	}
+
+	var prep *prepared
+	var args []core.Value
+
+	switch kind {
+	case 'S':
+		prep = s.prepared[name]
+		if prep == nil {
+			return s.protoError("26000", "unknown prepared statement "+quoteName(name))
+		}
+		if prep.util != nil || prep.txControl != "" {
+			if err := s.c.sendParameterDescription(0); err != nil {
+				return err
+			}
+			return s.sendUtilDescribe(prep.util)
+		}
+		if err := s.c.sendParameterDescription(prep.numParams); err != nil {
+			return err
+		}
+		// Probe with 0 (not NULL) so expression columns like "$1 * 2" keep a
+		// concrete type we can advertise; NULL would erase it.
+		args = probeArgs(prep.numParams)
+	case 'P':
+		pt := s.portals[name]
+		if pt == nil {
+			return s.protoError("34000", "unknown portal "+quoteName(name))
+		}
+		prep = pt.prep
+		if prep.util != nil || prep.txControl != "" {
+			return s.sendUtilDescribe(prep.util)
+		}
+		args = pt.params
+	default:
+		return s.protoError("08P01", "invalid Describe target")
+	}
+
+	cols, err := s.describeSQL(prep.sql, args)
+	if err != nil {
+		logQueryError("describe", err, prep.sql, prep.sql)
+		return s.protoError("42000", err.Error())
+	}
+	if cols == nil {
+		return s.c.send(msgNoData, nil)
+	}
+	oids := make([]uint32, len(cols))
+	for i, col := range cols {
+		oids[i] = oidForColumn(col, nil, i)
+	}
+	return s.c.sendRowDescription(cols, oids)
+}
+
+func (s *session) handleExecute(body []byte) error {
+	r := newReader(body)
+	portalName := r.cstring()
+	r.int32() // max rows; ignored (we always return the full result)
+	if r.err != nil {
+		return s.protoError("08P01", "malformed Execute message")
+	}
+
+	pt := s.portals[portalName]
+	if pt == nil {
+		return s.protoError("34000", "unknown portal "+quoteName(portalName))
+	}
+
+	if kind := pt.prep.txControl; kind != "" {
+		tag, err := s.applyTxControl(kind)
+		if err != nil {
+			s.txFailed = s.tx != nil
+			return s.protoError("25000", err.Error())
+		}
+		return s.c.sendCommandComplete(tag)
+	}
+
+	if s.abortedTxError() {
+		return s.protoError("25P02",
+			"current transaction is aborted, commands ignored until end of transaction block")
+	}
+
+	if u := pt.prep.util; u != nil {
+		if u.IsQuery {
+			oids := make([]uint32, len(u.Columns))
+			for i, col := range u.Columns {
+				oids[i] = oidForColumn(col, u.Rows, i)
+			}
+			if err := s.c.sendDataRows(u.Rows, oids, pt.formats); err != nil {
+				return err
+			}
+		}
+		return s.c.sendCommandComplete(commandTag(u))
+	}
+
+	rs, err := s.exec(pt.prep.sql, pt.params)
+	if err != nil {
+		logQueryError("execute", err, pt.prep.sql, pt.prep.sql)
+		if s.tx != nil {
+			s.txFailed = true
+		}
+		return s.protoError("42000", err.Error())
+	}
+	if rs.IsQuery {
+		// Extended protocol: DataRows only. The RowDescription was already
+		// sent in reply to Describe.
+		oids := make([]uint32, len(rs.Columns))
+		for i, col := range rs.Columns {
+			oids[i] = oidForColumn(col, rs.Rows, i)
+		}
+		if err := s.c.sendDataRows(rs.Rows, oids, pt.formats); err != nil {
+			return err
+		}
+	}
+	return s.c.sendCommandComplete(commandTag(rs))
+}
+
+func (s *session) handleClose(body []byte) error {
+	r := newReader(body)
+	kind := r.byte()
+	name := r.cstring()
+	if r.err != nil {
+		return s.protoError("08P01", "malformed Close message")
+	}
+	switch kind {
+	case 'S':
+		delete(s.prepared, name)
+	case 'P':
+		delete(s.portals, name)
+	}
+	return s.c.send(msgCloseComplete, nil)
+}
+
+// --- helpers -----------------------------------------------------------------
+
+// sendUtilDescribe replies to a Describe for an intercepted utility statement:
+// a RowDescription for SHOW, NoData for SET/BEGIN/etc.
+func (s *session) sendUtilDescribe(rs *core.ResultSet) error {
+	if rs == nil || !rs.IsQuery {
+		return s.c.send(msgNoData, nil)
+	}
+	oids := make([]uint32, len(rs.Columns))
+	for i, col := range rs.Columns {
+		oids[i] = oidForColumn(col, rs.Rows, i)
+	}
+	return s.c.sendRowDescription(rs.Columns, oids)
+}
+
+// probeArgs returns n non-NULL placeholder values used only for type
+// introspection during statement Describe.
+func probeArgs(n int) []core.Value {
+	args := make([]core.Value, n)
+	for i := range args {
+		args[i] = int64(0)
+	}
+	return args
+}
+
+func trimStatement(sql string) string {
+	return strings.TrimSpace(strings.TrimRight(strings.TrimSpace(sql), ";"))
+}
+
+func quoteName(s string) string {
+	if s == "" {
+		return `""`
+	}
+	return `"` + s + `"`
+}
+
+// formatFor resolves the format code for parameter i: 0 codes means all text,
+// 1 code applies to every parameter, otherwise it is per-parameter.
+func formatFor(fmts []int, i int) int {
+	switch len(fmts) {
+	case 0:
+		return 0
+	case 1:
+		return fmts[0]
+	default:
+		if i < len(fmts) {
+			return fmts[i]
+		}
+		return 0
+	}
+}
+
+// decodeParam turns a bound parameter into a core.Value. Text is passed through
+// as a string (SQLite coerces as needed). Binary is a best-effort fallback,
+// since we advertise unknown parameter types to steer clients toward text.
+func decodeParam(format int, raw []byte) core.Value {
+	if format == 0 {
+		return string(raw)
+	}
+	switch len(raw) {
+	case 8:
+		return int64(byteOrder.Uint64(raw))
+	case 4:
+		return int64(int32(byteOrder.Uint32(raw)))
+	case 2:
+		return int64(int16(byteOrder.Uint16(raw)))
+	case 1:
+		return raw[0] != 0
+	default:
+		return raw
+	}
+}
+
+// countParams counts positional placeholders: the highest $N index, or the
+// number of bare "?" placeholders, whichever is greater.
+func countParams(sql string) int {
+	max, bare := 0, 0
+	for i := 0; i < len(sql); i++ {
+		switch sql[i] {
+		case '?':
+			bare++
+		case '$':
+			j, n := i+1, 0
+			for j < len(sql) && sql[j] >= '0' && sql[j] <= '9' {
+				n = n*10 + int(sql[j]-'0')
+				j++
+			}
+			if j > i+1 && n > max {
+				max = n
+			}
+			i = j - 1
+		}
+	}
+	if bare > max {
+		return bare
+	}
+	return max
+}
+
+// bodyReader is a cursor over a message body. On any short read it records an
+// error and returns zero values, so callers check err once at the end.
+type bodyReader struct {
+	b   []byte
+	pos int
+	err error
+}
+
+func newReader(b []byte) *bodyReader { return &bodyReader{b: b} }
+
+func (r *bodyReader) byte() byte {
+	if r.pos+1 > len(r.b) {
+		r.fail()
+		return 0
+	}
+	v := r.b[r.pos]
+	r.pos++
+	return v
+}
+
+func (r *bodyReader) int16() int {
+	if r.pos+2 > len(r.b) {
+		r.fail()
+		return 0
+	}
+	v := int(int16(byteOrder.Uint16(r.b[r.pos:])))
+	r.pos += 2
+	return v
+}
+
+func (r *bodyReader) int32() int {
+	if r.pos+4 > len(r.b) {
+		r.fail()
+		return 0
+	}
+	v := int(int32(byteOrder.Uint32(r.b[r.pos:])))
+	r.pos += 4
+	return v
+}
+
+func (r *bodyReader) cstring() string {
+	i := bytes.IndexByte(r.b[r.pos:], 0)
+	if i < 0 {
+		r.fail()
+		return ""
+	}
+	s := string(r.b[r.pos : r.pos+i])
+	r.pos += i + 1
+	return s
+}
+
+func (r *bodyReader) bytes(n int) []byte {
+	if n < 0 || r.pos+n > len(r.b) {
+		r.fail()
+		return nil
+	}
+	v := r.b[r.pos : r.pos+n]
+	r.pos += n
+	return v
+}
+
+func (r *bodyReader) fail() {
+	if r.err == nil {
+		r.err = io.ErrUnexpectedEOF
+	}
+}
