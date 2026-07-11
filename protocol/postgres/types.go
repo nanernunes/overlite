@@ -102,6 +102,8 @@ var boolCatalogColumns = map[string]bool{
 	// Boolean expression aliases pg_dump reads as t/f (SQLite returns 1/0 for
 	// these computed columns, which have no declared type).
 	"notnull_islocal": true, "notnull_noinherit": true, "notnull_invalidoid": true,
+	// A sequence read as a relation: is_called is boolean.
+	"is_called": true,
 }
 
 // oidForColumn picks an OID for a column. SQLite is dynamically typed, so we

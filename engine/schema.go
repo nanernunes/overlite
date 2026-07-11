@@ -178,6 +178,17 @@ func setupConnection(ctx context.Context, exec func(string) error, query func(st
 	if err := exec(enumLabelsTableDDL); err != nil {
 		return err
 	}
+	// Expose each sequence as a one-row relation (last_value/is_called), as
+	// Postgres does, so pg_dump can read its current value with
+	// "SELECT last_value, is_called FROM <seq>".
+	if seqs, err := query("SELECT seqname FROM _overlite_sequences WHERE seqname NOT IN" +
+		" (SELECT name FROM sqlite_master WHERE type IN ('table','view'))"); err == nil {
+		for _, name := range seqs {
+			_ = exec(`CREATE TEMP VIEW IF NOT EXISTS "` + strings.ReplaceAll(name, `"`, `""`) +
+				`" AS SELECT last_value, 0 AS log_cnt, is_called FROM _overlite_sequences WHERE seqname = ` +
+				sqlQuote(name))
+		}
+	}
 	// Refresh the global enum oid->name registry that format_type() reads.
 	if names, err := query("SELECT (rowid + 90000000) || ':' || typname FROM _overlite_enum_types"); err == nil {
 		refreshEnumNames(names)

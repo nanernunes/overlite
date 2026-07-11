@@ -44,6 +44,24 @@ func TestDumpMachinery(t *testing.T) {
 	assert.Contains(t, def, "USING btree (code)")
 }
 
+// TestSequenceReadableAsRelation checks a sequence can be read as a one-row
+// relation (last_value/is_called), which is how pg_dump captures its state.
+func TestSequenceReadableAsRelation(t *testing.T) {
+	addr := startServer(t)
+	c1 := connect(t, addr)
+	mustExec(t, c1, `CREATE SEQUENCE s START WITH 42`)
+	seqVal(t, c1, `SELECT nextval('s')`) // -> 42, is_called becomes true
+
+	// A fresh connection materializes the sequence-as-relation view.
+	c2 := connect(t, addr)
+	var last int64
+	var called bool
+	require.NoError(t, c2.QueryRow(context.Background(),
+		`SELECT last_value, is_called FROM s`).Scan(&last, &called))
+	assert.EqualValues(t, 42, last)
+	assert.True(t, called)
+}
+
 // TestPgDumpIntegration runs the real pg_dump against the server when the binary
 // is available, asserting a usable schema dump.
 func TestPgDumpIntegration(t *testing.T) {
