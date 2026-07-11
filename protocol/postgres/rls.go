@@ -413,15 +413,20 @@ func (s *session) tryRLSInsert(sql string, params []core.Value) (bool, *core.Res
 		return false, nil, nil
 	}
 	// The row source is everything after the target/column-list — VALUES (…) or
-	// SELECT …, both valid as a CTE body — minus any trailing RETURNING.
+	// SELECT …, both valid as a CTE body — minus any trailing ON CONFLICT /
+	// RETURNING. The check applies to the source (insert-path) rows.
 	source := strings.TrimRight(sql[srcStart:], "; \t\n")
-	if ri := topLevelKeyword(source, "returning"); ri >= 0 {
-		source = source[:ri]
+	cut := len(source)
+	if ri := topLevelKeyword(source, "returning"); ri >= 0 && ri < cut {
+		cut = ri
 	}
+	if ci := topLevelOnConflict(source); ci >= 0 && ci < cut {
+		cut = ci
+	}
+	source = strings.TrimRight(source[:cut], "; \t\n")
 	srcLow := strings.ToLower(strings.TrimSpace(source))
 	// Forms we can't turn into a row-count check: enforce default-deny, else allow.
-	if strings.Contains(strings.ToLower(sql), "on conflict") ||
-		strings.HasPrefix(srcLow, "default") || strings.HasPrefix(srcLow, "overriding") {
+	if strings.HasPrefix(srcLow, "default") || strings.HasPrefix(srcLow, "overriding") {
 		if expr == "(0)" {
 			return true, nil, fmt.Errorf("new row violates row-level security policy for table %q", bare)
 		}
@@ -626,6 +631,57 @@ func topLevelKeyword(s, kw string) int {
 			}
 			if strings.EqualFold(s[i:j], kw) {
 				return i
+			}
+			i = j
+		default:
+			i++
+		}
+	}
+	return -1
+}
+
+// topLevelOnConflict returns the byte index of a top-level "ON CONFLICT" (an
+// "on" whose next word is "conflict"), distinguishing it from a JOIN's ON, or -1.
+func topLevelOnConflict(s string) int {
+	depth := 0
+	for i := 0; i < len(s); {
+		c := s[i]
+		switch {
+		case c == '\'':
+			i = endOfStringLiteral(s, i)
+		case c == '"':
+			i++
+			for i < len(s) && s[i] != '"' {
+				i++
+			}
+			if i < len(s) {
+				i++
+			}
+		case c == '(':
+			depth++
+			i++
+		case c == ')':
+			if depth > 0 {
+				depth--
+			}
+			i++
+		case depth == 0 && isIdentStart(c):
+			j := i
+			for j < len(s) && isIdentPart(s[j]) {
+				j++
+			}
+			if strings.EqualFold(s[i:j], "on") {
+				k := j
+				for k < len(s) && (s[k] == ' ' || s[k] == '\t' || s[k] == '\n' || s[k] == '\r') {
+					k++
+				}
+				m := k
+				for m < len(s) && isIdentPart(s[m]) {
+					m++
+				}
+				if strings.EqualFold(s[k:m], "conflict") {
+					return i
+				}
 			}
 			i = j
 		default:

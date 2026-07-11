@@ -181,6 +181,45 @@ func TestRLSInsertSelect(t *testing.T) {
 	assert.Equal(t, 1, n)
 }
 
+// TestRLSInsertOnConflict: WITH CHECK is enforced on the INSERT path of an
+// upsert (ON CONFLICT DO NOTHING / DO UPDATE).
+func TestRLSInsertOnConflict(t *testing.T) {
+	t.Setenv("POSTGRES_PASSWORD", "adminpw")
+	addr := startServer(t)
+	ctx := context.Background()
+	admin := connectAs(t, addr, "postgres", "adminpw")
+	mustExec(t, admin, `CREATE ROLE alice LOGIN PASSWORD 'a'`)
+	mustExec(t, admin, `CREATE TABLE items (id int PRIMARY KEY, owner text, body text)`)
+	mustExec(t, admin, `INSERT INTO items VALUES (1,'alice','a')`)
+	mustExec(t, admin, `GRANT ALL ON items TO alice`)
+	mustExec(t, admin, `ALTER TABLE items ENABLE ROW LEVEL SECURITY`)
+	mustExec(t, admin, `CREATE POLICY own ON items FOR ALL USING (owner = current_user)`)
+
+	alice := connectAs(t, addr, "alice", "a")
+
+	// New own row, DO NOTHING: accepted.
+	_, err := alice.Exec(ctx, `INSERT INTO items VALUES (2,'alice','x') ON CONFLICT (id) DO NOTHING`)
+	require.NoError(t, err)
+
+	// A row owned by someone else is rejected on the INSERT path.
+	_, err = alice.Exec(ctx, `INSERT INTO items VALUES (3,'bob','x') ON CONFLICT (id) DO NOTHING`)
+	require.Error(t, err, "insert-path WITH CHECK")
+
+	// Upsert onto her own existing row: source passes the check, DO UPDATE runs.
+	_, err = alice.Exec(ctx,
+		`INSERT INTO items VALUES (1,'alice','updated') ON CONFLICT (id) DO UPDATE SET body = 'updated'`)
+	require.NoError(t, err)
+
+	var body string
+	require.NoError(t, admin.QueryRow(ctx, `SELECT body FROM items WHERE id = 1`).Scan(&body))
+	assert.Equal(t, "updated", body)
+
+	// Bad row didn't land; the DO NOTHING one did.
+	var n int
+	require.NoError(t, admin.QueryRow(ctx, `SELECT count(*) FROM items WHERE id IN (2,3)`).Scan(&n))
+	assert.Equal(t, 1, n)
+}
+
 // TestRLSDefaultDeny: with RLS enabled and no policy for the command, a subject
 // sees nothing.
 func TestRLSDefaultDeny(t *testing.T) {

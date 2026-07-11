@@ -220,9 +220,11 @@ These run so migrations, ORMs, and dumps proceed, but have no real effect:
   and `BYPASSRLS` roles are exempt. Parameterized inserts (`VALUES ($1, …)`),
   `INSERT … RETURNING`, and `INSERT … SELECT` are all checked — the bound params
   are replayed into the validation, RETURNING is stripped for it, and the source
-  query is validated row-by-row. Caveat: `ON CONFLICT`/`DEFAULT VALUES` inserts
-  skip the `WITH CHECK` (default-deny still applies), and the source read of an
-  `INSERT … SELECT` is not itself RLS-filtered.
+  query is validated row-by-row. `INSERT … ON CONFLICT` upserts are checked on
+  their insert path. Caveat: `DEFAULT VALUES` inserts skip the `WITH CHECK`
+  (default-deny still applies), a `DO UPDATE SET` isn't re-validated against the
+  UPDATE policy, and the source read of an `INSERT … SELECT` is not itself
+  RLS-filtered.
 - **Enum columns** — enforced via `TEXT` + `CHECK` and `\dT+` lists the
   elements, but there's no enum ordering/comparison.
 - **Composite types** — `CREATE TYPE … AS (…)` shows in `pg_type`/`\dT`, but the
