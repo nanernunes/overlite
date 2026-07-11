@@ -72,7 +72,11 @@ func secondWordUpper(sql string) string {
 
 // txControlKind classifies transaction-control statements (handled by the
 // session, which owns the real transaction), or "" for anything else.
+// "ROLLBACK TO [SAVEPOINT] x" is a savepoint op, not a full rollback.
 func txControlKind(sql string) string {
+	if savepointKind(sql) != "" {
+		return ""
+	}
 	switch firstWordUpper(sql) {
 	case "BEGIN", "START":
 		return "BEGIN"
@@ -82,6 +86,59 @@ func txControlKind(sql string) string {
 		return "ROLLBACK"
 	}
 	return ""
+}
+
+// savepointKind classifies SAVEPOINT / RELEASE / ROLLBACK TO statements, or ""
+// for anything else. SQLite understands the syntax; the session just routes them
+// to the active transaction.
+func savepointKind(sql string) string {
+	fields := strings.Fields(sql)
+	if len(fields) == 0 {
+		return ""
+	}
+	switch strings.ToUpper(fields[0]) {
+	case "SAVEPOINT":
+		return "SAVEPOINT"
+	case "RELEASE":
+		return "RELEASE"
+	case "ROLLBACK", "ABORT":
+		for _, f := range fields[1:] {
+			if strings.EqualFold(f, "to") {
+				return "ROLLBACK TO"
+			}
+		}
+	}
+	return ""
+}
+
+// trySavepoint handles SAVEPOINT/RELEASE/ROLLBACK TO on the active transaction.
+// handled=false means it was not a savepoint statement. When handled and errcode
+// is non-empty, the caller sends that error; otherwise it sends CommandComplete
+// with tag. ROLLBACK TO recovers an aborted transaction (clears the failed flag).
+func (s *session) trySavepoint(sql string) (handled bool, tag, errcode string, err error) {
+	kind := savepointKind(sql)
+	if kind == "" {
+		return false, "", "", nil
+	}
+	if s.tx == nil {
+		return true, "", "25P01", fmt.Errorf("%s can only be used in transaction blocks", kind)
+	}
+	if kind == "ROLLBACK TO" {
+		if _, e := s.tx.Execute(s.ctx, sql, nil); e != nil {
+			return true, "", "42000", e
+		}
+		s.txFailed = false // recovered to the savepoint
+		return true, "ROLLBACK", "", nil
+	}
+	if s.txFailed {
+		return true, "", "25P02",
+			fmt.Errorf("current transaction is aborted, commands ignored until end of transaction block")
+	}
+	if _, e := s.tx.Execute(s.ctx, sql, nil); e != nil {
+		s.txFailed = true
+		return true, "", "42000", e
+	}
+	return true, kind, "", nil
 }
 
 // trySchemaDDL handles CREATE/DROP SCHEMA by delegating to the engine's

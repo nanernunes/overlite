@@ -30,6 +30,57 @@ func TestNoOpUtilityStatements(t *testing.T) {
 	assert.Equal(t, 1, n)
 }
 
+func TestSavepoints(t *testing.T) {
+	conn := connect(t, startServer(t))
+	ctx := context.Background()
+	mustExec(t, conn, `CREATE TABLE t (id int)`)
+
+	tx, err := conn.Begin(ctx)
+	require.NoError(t, err)
+	_, err = tx.Exec(ctx, `INSERT INTO t VALUES (1)`)
+	require.NoError(t, err)
+	_, err = tx.Exec(ctx, `SAVEPOINT sp1`)
+	require.NoError(t, err)
+	_, err = tx.Exec(ctx, `INSERT INTO t VALUES (2)`)
+	require.NoError(t, err)
+	// Roll back to the savepoint: row 2 is undone, row 1 stays.
+	_, err = tx.Exec(ctx, `ROLLBACK TO SAVEPOINT sp1`)
+	require.NoError(t, err)
+	_, err = tx.Exec(ctx, `INSERT INTO t VALUES (3)`)
+	require.NoError(t, err)
+	_, err = tx.Exec(ctx, `RELEASE SAVEPOINT sp1`)
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit(ctx))
+
+	assert.Equal(t, []string{"1", "3"}, queryColumn(t, conn, `SELECT id::text FROM t ORDER BY id`, 0))
+}
+
+// TestSavepointRecoversAbortedTx checks ROLLBACK TO clears the aborted state so
+// the transaction can continue (Postgres error-recovery semantics).
+func TestSavepointRecoversAbortedTx(t *testing.T) {
+	conn := connect(t, startServer(t))
+	ctx := context.Background()
+	mustExec(t, conn, `CREATE TABLE t (id int PRIMARY KEY)`)
+
+	tx, err := conn.Begin(ctx)
+	require.NoError(t, err)
+	_, err = tx.Exec(ctx, `SAVEPOINT sp`)
+	require.NoError(t, err)
+	// Cause an error, aborting the (sub)transaction.
+	_, err = tx.Exec(ctx, `INSERT INTO t VALUES ('not a number' + 1)`)
+	_ = err
+	_, err = tx.Exec(ctx, `SELECT bogus_col`)
+	require.Error(t, err)
+	// Recover by rolling back to the savepoint, then continue.
+	_, err = tx.Exec(ctx, `ROLLBACK TO SAVEPOINT sp`)
+	require.NoError(t, err)
+	_, err = tx.Exec(ctx, `INSERT INTO t VALUES (42)`)
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit(ctx))
+
+	assert.Equal(t, []string{"42"}, queryColumn(t, conn, `SELECT id::text FROM t`, 0))
+}
+
 // TestOuterJoins covers RIGHT/FULL OUTER JOIN, which recent SQLite runs
 // natively (pass-through).
 func TestOuterJoins(t *testing.T) {

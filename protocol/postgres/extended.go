@@ -405,6 +405,13 @@ func (s *session) handleExecute(body []byte) error {
 		return s.c.sendCommandComplete(tag)
 	}
 
+	if handled, tag, code, err := s.trySavepoint(pt.prep.raw); handled {
+		if err != nil {
+			return s.protoError(code, err.Error())
+		}
+		return s.c.sendCommandComplete(tag)
+	}
+
 	if s.abortedTxError() {
 		return s.protoError("25P02",
 			"current transaction is aborted, commands ignored until end of transaction block")

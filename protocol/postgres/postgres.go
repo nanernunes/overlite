@@ -151,6 +151,15 @@ func (s *session) handleSimpleQuery(body []byte) error {
 		return s.c.sendCommandComplete(tag)
 	}
 
+	// Savepoints (incl. ROLLBACK TO, which recovers an aborted tx) are handled
+	// before the aborted-tx guard.
+	if handled, tag, code, err := s.trySavepoint(sql); handled {
+		if err != nil {
+			return s.c.sendError(code, err.Error())
+		}
+		return s.c.sendCommandComplete(tag)
+	}
+
 	// Reject non-tx-control statements while the transaction is aborted.
 	if s.abortedTxError() {
 		return s.c.sendError("25P02",
