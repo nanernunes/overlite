@@ -57,8 +57,30 @@ func interceptUtility(sql string) (*core.ResultSet, bool) {
 		if secondWordUpper(sql) == "EXTENSION" {
 			return &core.ResultSet{Command: w + " EXTENSION"}, true
 		}
+	case "ALTER":
+		// Restore-time statements SQLite can't run: ownership changes, schema
+		// alters, and constraints added to an existing table. Accepted as no-ops
+		// so a pg_dump restores as far as SQLite allows (constraints not enforced).
+		if alterIsNoop(sql) {
+			return &core.ResultSet{Command: "ALTER " + secondWordUpper(sql)}, true
+		}
 	}
 	return nil, false
+}
+
+// alterIsNoop reports whether an ALTER statement is one we accept without
+// effect (SQLite can't apply it). ALTER TABLE ADD COLUMN etc. return false and
+// pass through to SQLite.
+func alterIsNoop(sql string) bool {
+	up := strings.ToUpper(sql)
+	switch secondWordUpper(sql) {
+	case "SCHEMA":
+		return true
+	case "TABLE":
+		return strings.Contains(up, " OWNER TO ") || strings.Contains(up, " ADD CONSTRAINT ")
+	default:
+		return strings.Contains(up, " OWNER TO ")
+	}
 }
 
 // secondWordUpper returns the upper-cased second whitespace-delimited word.

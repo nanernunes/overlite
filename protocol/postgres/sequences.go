@@ -70,7 +70,7 @@ func (s *session) createSequence(rest []string) error {
 	if len(rest) == 0 {
 		return fmt.Errorf("syntax error in CREATE SEQUENCE")
 	}
-	name := unquoteIdent(rest[0])
+	name := seqRef(rest[0])
 	opts := defaultSeqOptions()
 	if err := parseSeqOptions(rest[1:], &opts); err != nil {
 		return err
@@ -104,8 +104,14 @@ func (s *session) alterSequence(rest []string) error {
 	if len(rest) == 0 {
 		return fmt.Errorf("syntax error in ALTER SEQUENCE")
 	}
-	name := unquoteIdent(rest[0])
+	name := seqRef(rest[0])
 	rest = rest[1:]
+
+	// ALTER SEQUENCE x OWNED BY / OWNER TO ... — ownership, accepted as a no-op
+	// (pg_dump emits these for serial-owned sequences).
+	if len(rest) >= 1 && (strings.EqualFold(rest[0], "owned") || strings.EqualFold(rest[0], "owner")) {
+		return nil
+	}
 
 	// ALTER SEQUENCE x RESTART [WITH n] resets the counter (start unless given).
 	if len(rest) >= 1 && strings.EqualFold(rest[0], "restart") {
@@ -154,7 +160,7 @@ func (s *session) dropSequence(rest []string) error {
 		rest = rest[2:]
 	}
 	for _, name := range strings.Split(strings.Join(rest, " "), ",") {
-		name = unquoteIdent(strings.TrimSpace(strings.TrimRight(name, ";")))
+		name = seqRef(strings.TrimSpace(strings.TrimRight(name, ";")))
 		if name == "" || strings.EqualFold(name, "cascade") || strings.EqualFold(name, "restrict") {
 			continue
 		}
