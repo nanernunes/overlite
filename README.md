@@ -101,11 +101,87 @@ for a real production system**. ✅ done · 🟡 partial · ⬜ not yet.
 | Server-side logic | ⬜ | PL/pgSQL functions & procedures (triggers only in SQLite syntax) |
 | Sequences | ✅ | `CREATE`/`ALTER`/`DROP SEQUENCE`, `nextval`/`currval`/`setval`/`lastval`, `\ds`; `DEFAULT nextval()` in DDL not supported (use `SERIAL`) |
 | Enum types | 🟡 | `CREATE`/`ALTER`/`DROP TYPE … AS ENUM`, `\dT`; enum columns become `TEXT` + a `CHECK`; no enum ordering semantics |
-| Rich types | ⬜ | arrays, `uuid`, ranges, `interval` arithmetic |
-| Extensions | ⬜ | `CREATE EXTENSION` (uuid-ossp, pgcrypto, postgis, …) |
-| `LISTEN`/`NOTIFY`, query cancellation | ⬜ | |
+| `uuid` type | ✅ | stored as text; `gen_random_uuid()`/`uuid_generate_v4()` |
+| Query cancellation | ✅ | `CancelRequest` interrupts a running query |
+| Rich types | ⬜ | arrays, `hstore`, ranges; `interval` arithmetic is partial |
+| Extensions | 🟡 | `CREATE EXTENSION` accepted as a no-op; common functions provided directly |
+| `LISTEN`/`NOTIFY` | 🟡 | accepted as no-ops (no delivery) |
 | Replication / HA | ⬜ | |
 
 Everything marked ✅ is exercised end-to-end against real `psql` and pgx
 (`make test`). The 🟡/⬜ rows are the gap between "runs your app in dev" and
 "drop-in Postgres for production".
+
+## Limitations
+
+overlite stores in SQLite, so some Postgres features either can't be expressed
+faithfully or aren't modeled yet. The full, current breakdown:
+
+### Inherent to the SQLite backend
+
+These would require emulating features SQLite fundamentally lacks:
+
+- **Arrays** (`int[]`, `text[]`), **`hstore`**, geometric / network / range types
+  — SQLite has no array/composite storage.
+- **Exact `numeric`/`decimal`** precision & scale, and **`money`** — SQLite uses
+  type affinity, not fixed-point.
+- **`timestamptz`** / real time-zone math — timestamps are stored as text.
+- **`ALTER TABLE ALTER COLUMN TYPE`** and **`ADD CONSTRAINT`** — SQLite can't
+  change a column's type or add a constraint to an existing table. (A `pg_dump`
+  restore still loads data/tables/sequences; those constraint statements are
+  accepted but not enforced.)
+- **`DEFAULT nextval('seq')` in DDL** — SQLite rejects non-constant defaults;
+  use `SERIAL` (which maps to `INTEGER PRIMARY KEY AUTOINCREMENT`).
+- **`CREATE FUNCTION` / PL/pgSQL / stored procedures.**
+- **`LATERAL` joins.**
+- **`CREATE`/`DROP SCHEMA` inside a transaction** — schemas are attached files
+  and `ATTACH` can't run in a SQLite transaction.
+- **JSON key-existence operators `?`, `?|`, `?&`** — `?` collides with the
+  parameter placeholder (containment `@>` / `<@` *is* supported).
+- **`SERIAL` in `pg_dump`** dumps as plain `integer` — on disk it is
+  `AUTOINCREMENT`, not a sequence.
+
+### Not implemented yet (but feasible)
+
+- **`CREATE TYPE`** composite / range / base types (only `… AS ENUM` is modeled;
+  other forms are accepted as a no-op).
+- **Multiple users / `pg_hba`-style** host rules (one configured role/password).
+- **Populated `pg_proc`** — `\df` runs but lists nothing.
+- **Remainder of `pg_catalog`** (`pg_depend`, `pg_statistic`, …) — present but
+  empty.
+- **Query-cancellation aside**, no `LISTEN`/`NOTIFY` delivery, and no replication
+  / HA.
+
+### Accepted but not enforced (no-ops)
+
+These run so migrations, ORMs, and dumps proceed, but have no real effect:
+
+- **`GRANT` / `REVOKE`** and role attributes — no per-object privileges or RLS.
+- **`COMMENT ON`** — accepted, not stored.
+- **`CREATE`/`DROP EXTENSION`** — the common functions (e.g. `gen_random_uuid`)
+  are provided directly.
+- **`LISTEN` / `UNLISTEN` / `NOTIFY`** — no message delivery.
+- **`SET`/`BEGIN ISOLATION LEVEL`** — SQLite serializes writes; levels have no
+  effect.
+- **`ALTER … OWNER TO`, `ALTER SCHEMA`** — ownership isn't modeled.
+
+### Partial (works, with caveats)
+
+- **Roles** — `CREATE`/`ALTER`/`DROP ROLE`/`USER` show up in `\du`, but
+  attributes aren't enforced.
+- **Enum columns** — enforced via `TEXT` + `CHECK`, but there's no enum
+  ordering/comparison and `\dT+` doesn't list elements.
+- **`DISTINCT ON (...)`** — rewritten to a `ROW_NUMBER()` window; needs an
+  explicit column list (not `SELECT *`).
+- **`interval` arithmetic** — `ts ± interval '1 day'` works; no bare `interval`
+  value type and no `age()`.
+- **`pg_trigger`** — populated and queryable, but psql's `\d` *Triggers* section
+  needs `unnest … WITH ORDINALITY`.
+- **`information_schema`** — constraints/columns/views/sequences populated;
+  `check_constraints`/`routines` are empty and column precision is `NULL`.
+- **Type OIDs** — common ones are faithful; all integers advertise as `int8`
+  (catalog oids exceed int4) and `numeric` advertises as `float8`.
+- **`SET search_path`** and **`COLLATE`** — accepted; unqualified names always
+  resolve in `public`/`main`, and unsupported collations are dropped.
+- **`ALTER TABLE`** — add/drop/rename column and rename table only.
+- **DBeaver** — connects and browses/reads data; full validation is in progress.
