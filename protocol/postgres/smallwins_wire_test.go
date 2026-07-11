@@ -30,6 +30,29 @@ func TestNoOpUtilityStatements(t *testing.T) {
 	assert.Equal(t, 1, n)
 }
 
+func TestJSONContainment(t *testing.T) {
+	conn := connect(t, startServer(t))
+	mustExec(t, conn, `CREATE TABLE docs (id int, body jsonb)`)
+	mustExec(t, conn, `INSERT INTO docs VALUES
+		(1, '{"name":"ada","tags":["a","b"],"meta":{"x":1}}'),
+		(2, '{"name":"bob","tags":["c"]}')`)
+
+	// @> object containment.
+	assert.Equal(t, []string{"1"}, queryColumn(t, conn,
+		`SELECT id::text FROM docs WHERE body @> '{"name":"ada"}' ORDER BY id`, 0))
+	// @> nested + array element containment.
+	assert.Equal(t, []string{"1"}, queryColumn(t, conn,
+		`SELECT id::text FROM docs WHERE body @> '{"meta":{"x":1}}'`, 0))
+	assert.Equal(t, []string{"1"}, queryColumn(t, conn,
+		`SELECT id::text FROM docs WHERE body @> '{"tags":["b"]}'`, 0))
+	// No match.
+	assert.Empty(t, queryColumn(t, conn,
+		`SELECT id::text FROM docs WHERE body @> '{"name":"zed"}'`, 0))
+	// <@ (contained by): the literal on the left is contained in the column.
+	assert.Equal(t, []string{"2"}, queryColumn(t, conn,
+		`SELECT id::text FROM docs WHERE '{"name":"bob"}' <@ body`, 0))
+}
+
 func TestIntervalArithmetic(t *testing.T) {
 	conn := connect(t, startServer(t))
 	ctx := context.Background()

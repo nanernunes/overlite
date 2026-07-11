@@ -161,6 +161,17 @@ var registerCatalog = sync.OnceFunc(func() {
 		return sqliteTypeOID(fmt.Sprint(args[0])), nil
 	})
 
+	// jsonb containment (@> / <@, rewritten to json_contains in the dialect).
+	scalar("json_contains", 2, func(args []driver.Value) (driver.Value, error) {
+		if len(args) < 2 || args[0] == nil || args[1] == nil {
+			return int64(0), nil
+		}
+		if jsonbContains(fmt.Sprint(args[0]), fmt.Sprint(args[1])) {
+			return int64(1), nil
+		}
+		return int64(0), nil
+	})
+
 	// Date/time functions (now()/extract are handled in the dialect layer).
 	scalar("date_trunc", 2, dateTruncFn)
 	scalar("date_part", 2, datePartFn)

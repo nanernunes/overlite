@@ -31,6 +31,7 @@ func rewrite(sql string) string {
 	sql = rewriteStringAgg(sql)
 	sql = rewriteGenerateSeries(sql)
 	sql = rewriteCasts(sql)
+	sql = rewriteJSONContains(sql) // after casts, so "x::jsonb @> ..." operands are whole
 	sql = rewriteArraySubscript(sql)
 	sql = rewriteObjectDefs(sql)
 	sql = rewriteCollate(sql)
@@ -735,6 +736,50 @@ func rewriteArraySubscript(sql string) string {
 	return mapOutsideStrings(sql, func(code string) string {
 		return reArraySubscript.ReplaceAllString(code, "NULL")
 	})
+}
+
+// rewriteJSONContains maps the jsonb containment operators "a @> b" and "a <@ b"
+// onto the json_contains(container, contained) function the engine provides.
+// The right operand is typically a JSON string literal; a function/cast on the
+// right isn't captured (same limitation as the regex-operator rewrite).
+func rewriteJSONContains(sql string) string {
+	for {
+		idx, op := indexJSONContain(sql)
+		if idx < 0 {
+			return sql
+		}
+		ls, le := operandBefore(sql, idx)
+		rs, re := operandAfter(sql, idx+len(op))
+		if ls == le || rs == re {
+			return sql // malformed; avoid looping
+		}
+		left, right := sql[ls:le], sql[rs:re]
+		repl := "json_contains(" + left + ", " + right + ")"
+		if op == "<@" { // a <@ b: b contains a
+			repl = "json_contains(" + right + ", " + left + ")"
+		}
+		sql = sql[:ls] + repl + sql[re:]
+	}
+}
+
+// indexJSONContain finds the first @> or <@ operator outside a string literal.
+func indexJSONContain(sql string) (int, string) {
+	inStr := false
+	for i := 0; i+1 < len(sql); i++ {
+		switch sql[i] {
+		case '\'':
+			inStr = !inStr
+		case '@':
+			if !inStr && sql[i+1] == '>' {
+				return i, "@>"
+			}
+		case '<':
+			if !inStr && sql[i+1] == '@' {
+				return i, "<@"
+			}
+		}
+	}
+	return -1, ""
 }
 
 // reStringAgg maps Postgres string_agg() onto SQLite's group_concat().
