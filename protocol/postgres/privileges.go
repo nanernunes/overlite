@@ -58,9 +58,13 @@ func (s *session) privBypass() bool {
 	return b
 }
 
-func (s *session) computeBypass() bool {
+func (s *session) computeBypass() bool { return s.roleBypasses(s.currentRole) }
+
+// roleBypasses reports whether a role skips privilege checks: an unmanaged role
+// (never CREATE ROLE'd -> trusted/legacy) or a superuser.
+func (s *session) roleBypasses(role string) bool {
 	rs, err := s.exec("SELECT rolsuper FROM _overlite_roles WHERE lower(rolname) = lower("+
-		sqlStr(s.currentRole)+")", nil)
+		sqlStr(role)+")", nil)
 	if err != nil || len(rs.Rows) == 0 {
 		return true // unmanaged role -> trusted/legacy
 	}

@@ -198,7 +198,9 @@ These run so migrations, ORMs, and dumps proceed, but have no real effect:
   (`SELECT`/`INSERT`/`UPDATE`/`DELETE`/`TRUNCATE`/`ALL`) against the connected
   role, with the creating role owning its tables. Role membership
   (`GRANT role TO role`) is enforced too: a member inherits the role's
-  privileges transitively when it has `INHERIT`, else through `SET ROLE`. Not
+  privileges transitively when it has `INHERIT`, else through `SET ROLE` —
+  which is itself allowed only to a role the session user is a member of
+  (superusers unrestricted; `SET SESSION AUTHORIZATION` is superuser-only). Not
   modeled: column- and row-level security, `GRANT` on
   schemas/sequences/functions, and the other role attributes (`SUPERUSER`,
   `CREATEDB`, …) beyond `INHERIT`. Superusers and roles that were never

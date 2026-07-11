@@ -100,11 +100,14 @@ func (s *session) applySetRole(sql string) error {
 		if !s.roleExists(target) {
 			return fmt.Errorf("role %q does not exist", target)
 		}
+		if !s.canSetRole(target) {
+			return fmt.Errorf("permission denied to set role %q", target)
+		}
 		s.currentRole = target
 		return nil
 	}
 
-	// SET/RESET SESSION AUTHORIZATION
+	// SET/RESET SESSION AUTHORIZATION — only a superuser session may change it.
 	if reset {
 		s.sessionUser, s.currentRole = s.authUser, s.authUser
 		return nil
@@ -114,11 +117,40 @@ func (s *session) applySetRole(sql string) error {
 		s.sessionUser, s.currentRole = s.authUser, s.authUser
 		return nil
 	}
+	if !s.roleBypasses(s.authUser) {
+		return fmt.Errorf("permission denied to set session authorization")
+	}
 	if !s.roleExists(target) {
 		return fmt.Errorf("role %q does not exist", target)
 	}
 	s.sessionUser, s.currentRole = target, target
 	return nil
+}
+
+// canSetRole reports whether the session may SET ROLE to target: always to its
+// own login/session role, unrestricted for a superuser or unmanaged session
+// user, otherwise only to a role the session user is a member of (directly or
+// indirectly). Unlike privilege inheritance, membership here is not gated by
+// INHERIT — SET ROLE is exactly how a NOINHERIT member uses a role.
+func (s *session) canSetRole(target string) bool {
+	if strings.EqualFold(target, s.sessionUser) || strings.EqualFold(target, s.authUser) {
+		return true
+	}
+	if s.roleBypasses(s.sessionUser) {
+		return true
+	}
+	return s.isMemberOf(s.sessionUser, target)
+}
+
+// isMemberOf reports whether member belongs to target transitively via the
+// membership graph (ignoring INHERIT).
+func (s *session) isMemberOf(member, target string) bool {
+	rs, err := s.exec(`WITH RECURSIVE m(role) AS (
+  SELECT lower(`+sqlStr(member)+`)
+  UNION
+  SELECT lower(x.roleof) FROM _overlite_memberships x JOIN m ON lower(x.member) = m.role
+) SELECT 1 FROM m WHERE role = lower(`+sqlStr(target)+`) LIMIT 1`, nil)
+	return err == nil && len(rs.Rows) > 0
 }
 
 // roleTarget reads the role name after an optional TO / = from the tokens.

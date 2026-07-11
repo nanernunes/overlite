@@ -35,12 +35,14 @@ func TestSetRole(t *testing.T) {
 	admin := connectAs(t, addr, "postgres", "adminpw")
 	mustExec(t, admin, `CREATE ROLE alice LOGIN PASSWORD 'alicepw'`)
 	mustExec(t, admin, `CREATE ROLE reporter`)
+	mustExec(t, admin, `CREATE ROLE other`)
+	mustExec(t, admin, `GRANT reporter TO alice`) // alice may become reporter
 
 	alice := connectAs(t, addr, "alice", "alicepw")
 	assert.Equal(t, "alice", scanStr(t, alice, `SELECT current_user`))
 	assert.Equal(t, "alice", scanStr(t, alice, `SELECT session_user`))
 
-	// SET ROLE changes current_user but not session_user.
+	// SET ROLE to a role she's a member of changes current_user, not session_user.
 	mustExec(t, alice, `SET ROLE reporter`)
 	assert.Equal(t, "reporter", scanStr(t, alice, `SELECT current_user`))
 	assert.Equal(t, "alice", scanStr(t, alice, `SELECT session_user`))
@@ -52,6 +54,11 @@ func TestSetRole(t *testing.T) {
 	// SET ROLE to a missing role is an error, and identity is unchanged.
 	_, err := alice.Exec(ctx, `SET ROLE ghost`)
 	require.Error(t, err)
+	assert.Equal(t, "alice", scanStr(t, alice, `SELECT current_user`))
+
+	// SET ROLE to a role she is NOT a member of is denied.
+	_, err = alice.Exec(ctx, `SET ROLE other`)
+	require.Error(t, err, "not a member of other")
 	assert.Equal(t, "alice", scanStr(t, alice, `SELECT current_user`))
 }
 
