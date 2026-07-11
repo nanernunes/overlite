@@ -49,9 +49,10 @@ const (
 
 // Magic protocol codes carried in the first int32 after the startup length.
 const (
-	protocolVersion3 = 196608   // 3.0
-	sslRequestCode   = 80877103 // client asking to start TLS
-	gssRequestCode   = 80877104 // client asking to start GSSAPI
+	protocolVersion3  = 196608   // 3.0
+	cancelRequestCode = 80877102 // client asking to cancel a running query
+	sslRequestCode    = 80877103 // client asking to start TLS
+	gssRequestCode    = 80877104 // client asking to start GSSAPI
 )
 
 var byteOrder = binary.BigEndian
@@ -72,18 +73,18 @@ func newWireConn(c net.Conn) *wireConn {
 // from the StartupMessage. If tlsConfig is non-nil, an SSLRequest is accepted
 // ('S') and the connection is upgraded to TLS; otherwise it is declined ('N')
 // and the client falls back to plaintext.
-func (c *wireConn) readStartup(tlsConfig *tls.Config) (map[string]string, error) {
+func (c *wireConn) readStartup(tlsConfig *tls.Config) (map[string]string, *cancelRequest, error) {
 	for {
 		length, err := c.readInt32()
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if length < 8 {
-			return nil, fmt.Errorf("startup: bogus length %d", length)
+			return nil, nil, fmt.Errorf("startup: bogus length %d", length)
 		}
 		body := make([]byte, length-4)
 		if _, err := io.ReadFull(c.r, body); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		code := int32(byteOrder.Uint32(body[:4]))
 
@@ -91,27 +92,35 @@ func (c *wireConn) readStartup(tlsConfig *tls.Config) (map[string]string, error)
 		case sslRequestCode:
 			if tlsConfig == nil {
 				if err := c.writeRaw([]byte{'N'}); err != nil {
-					return nil, err
+					return nil, nil, err
 				}
 				continue
 			}
 			if err := c.writeRaw([]byte{'S'}); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			if err := c.upgradeTLS(tlsConfig); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			continue
 		case gssRequestCode:
 			// We don't support GSSAPI encryption; decline.
 			if err := c.writeRaw([]byte{'N'}); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			continue
+		case cancelRequestCode:
+			if len(body) < 12 {
+				return nil, nil, fmt.Errorf("cancel request: short body")
+			}
+			return nil, &cancelRequest{
+				pid:    int32(byteOrder.Uint32(body[4:8])),
+				secret: int32(byteOrder.Uint32(body[8:12])),
+			}, nil
 		case protocolVersion3:
-			return parseStartupParams(body[4:]), nil
+			return parseStartupParams(body[4:]), nil, nil
 		default:
-			return nil, fmt.Errorf("unsupported protocol/startup code %d", code)
+			return nil, nil, fmt.Errorf("unsupported protocol/startup code %d", code)
 		}
 	}
 }

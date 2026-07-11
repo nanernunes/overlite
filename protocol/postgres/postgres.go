@@ -55,14 +55,26 @@ func (p *Protocol) DefaultPort() int { return 5432 }
 func (p *Protocol) Serve(ctx context.Context, conn net.Conn, engine core.Engine) error {
 	c := newWireConn(conn)
 
-	params, err := c.readStartup(p.tls)
+	params, cancelReq, err := c.readStartup(p.tls)
 	if err != nil {
 		return err
+	}
+	if cancelReq != nil {
+		// A CancelRequest is a bare connection: interrupt the target and close.
+		cancelBackend(cancelReq.pid, cancelReq.secret)
+		return nil
 	}
 	if err := p.authenticate(c, params["user"]); err != nil {
 		return err
 	}
-	if err := p.completeHandshake(c); err != nil {
+
+	// Assign this connection a backend key so a second connection can cancel
+	// its running query.
+	pid, secret := randInt32(), randInt32()
+	cl := registerBackend(pid, secret)
+	defer unregisterBackend(pid, secret)
+
+	if err := p.completeHandshake(c, pid, secret); err != nil {
 		return err
 	}
 
@@ -76,6 +88,7 @@ func (p *Protocol) Serve(ctx context.Context, conn net.Conn, engine core.Engine)
 	defer db.Close()
 
 	s := newSession(ctx, c, db)
+	s.canceler = cl
 	return s.loop()
 }
 
@@ -175,7 +188,7 @@ func md5Hex(b []byte) string {
 
 // completeHandshake sends AuthenticationOk (trust), a few parameter statuses,
 // and the first ReadyForQuery.
-func (p *Protocol) completeHandshake(c *wireConn) error {
+func (p *Protocol) completeHandshake(c *wireConn, pid, secret int32) error {
 	// AuthenticationOk: int32(0).
 	if err := c.send(msgAuthentication, i32(0)); err != nil {
 		return err
@@ -192,9 +205,9 @@ func (p *Protocol) completeHandshake(c *wireConn) error {
 			return err
 		}
 	}
-	// BackendKeyData: pid + secret. Values are arbitrary; we don't support
-	// cancellation yet.
-	if err := c.send(msgBackendKeyData, append(i32(1), i32(0)...)); err != nil {
+	// BackendKeyData: the pid + secret a CancelRequest must echo to cancel this
+	// connection's running query.
+	if err := c.send(msgBackendKeyData, append(i32(pid), i32(secret)...)); err != nil {
 		return err
 	}
 	if err := c.sendReadyForQuery(); err != nil {
@@ -302,7 +315,7 @@ func (s *session) handleSimpleQuery(body []byte) error {
 		if s.tx != nil {
 			s.txFailed = true
 		}
-		return s.c.sendError("42000", err.Error())
+		return s.sendExecError(err)
 	}
 	if rs.IsQuery {
 		if err := s.c.sendResultSet(rs); err != nil {

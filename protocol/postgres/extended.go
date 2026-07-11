@@ -36,6 +36,9 @@ type session struct {
 	// lastval). Keys are lower-cased sequence names.
 	seqCurr map[string]int64
 	seqLast string
+
+	// canceler interrupts this connection's in-flight query on a CancelRequest.
+	canceler *canceler
 }
 
 type prepared struct {
@@ -93,12 +96,30 @@ func (s *session) rewriteForExec(raw string) (string, error) {
 	return rewrite(x), nil
 }
 
-// exec runs a statement in the current transaction, or autocommit if none.
+// exec runs a statement in the current transaction, or autocommit if none,
+// under a cancellable context so a CancelRequest can interrupt it.
 func (s *session) exec(sql string, args []core.Value) (*core.ResultSet, error) {
+	ctx, cancel := s.armCancel()
+	defer cancel()
 	if s.tx != nil {
-		return s.tx.Execute(s.ctx, sql, args)
+		return s.tx.Execute(ctx, sql, args)
 	}
-	return s.db.Execute(s.ctx, sql, args)
+	return s.db.Execute(ctx, sql, args)
+}
+
+// armCancel derives a cancellable context from the session and registers its
+// cancel with the connection's canceler for the duration of one statement.
+func (s *session) armCancel() (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(s.ctx)
+	if s.canceler != nil {
+		s.canceler.arm(cancel)
+	}
+	return ctx, func() {
+		if s.canceler != nil {
+			s.canceler.disarm()
+		}
+		cancel()
+	}
 }
 
 func (s *session) describeSQL(sql string, args []core.Value) ([]core.Column, error) {
@@ -474,7 +495,7 @@ func (s *session) handleExecute(body []byte) error {
 			if s.tx != nil {
 				s.txFailed = true
 			}
-			return s.protoError("42000", err.Error())
+			return s.protoExecError(err)
 		}
 		pt.result, pt.pos = rs, 0
 	}
