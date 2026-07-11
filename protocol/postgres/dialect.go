@@ -30,6 +30,8 @@ func rewrite(sql string) string {
 	sql = rewriteAnyOperator(sql)
 	sql = rewriteStringAgg(sql)
 	sql = rewriteGenerateSeries(sql)
+	sql = rewritePgOptionsToTable(sql)
+	sql = rewriteUnnest(sql)
 	sql = rewriteCasts(sql)
 	sql = rewriteJSONContains(sql) // after casts, so "x::jsonb @> ..." operands are whole
 	sql = rewriteArraySubscript(sql)
@@ -154,21 +156,35 @@ func rewriteCasts(sql string) string {
 		for ts < len(sql) && sql[ts] == ' ' {
 			ts++
 		}
+		var typeName string
 		te := ts
-		for te < len(sql) && isTypeChar(sql[te]) {
-			te++
+		if ts < len(sql) && sql[ts] == '"' {
+			// Quoted type name, e.g. 's'::"char". Use the unquoted name.
+			j := ts + 1
+			for j < len(sql) && sql[j] != '"' {
+				j++
+			}
+			if j >= len(sql) {
+				return sql // unterminated
+			}
+			typeName = sql[ts+1 : j]
+			te = j + 1
+		} else {
+			for te < len(sql) && isTypeChar(sql[te]) {
+				te++
+			}
+			typeName = sql[ts:te]
 		}
-		typeEnd := te
 		// Drop array-type suffixes (int2[], text[][]); SQLite has no arrays and
 		// these appear only in catalog queries that return no rows here.
 		for strings.HasPrefix(sql[te:], "[]") {
 			te += 2
 		}
 		os, oe := operandBefore(sql, i)
-		if typeEnd == ts || os == oe {
+		if typeName == "" || os == oe {
 			return sql // no type name or no operand: leave it, avoid looping
 		}
-		sql = sql[:os] + castExpr(sql[os:oe], sql[ts:typeEnd]) + sql[te:]
+		sql = sql[:os] + castExpr(sql[os:oe], typeName) + sql[te:]
 	}
 }
 
@@ -969,6 +985,122 @@ func isAliasKeyword(w string) bool {
 	return false
 }
 
+// arrayLiteralElems extracts the elements of a Postgres array literal
+// '{a,b,c}' found in s (e.g. the argument to unnest), quoting non-numeric
+// elements. It returns ok=false when s holds no array literal.
+func arrayLiteralElems(s string) ([]string, bool) {
+	i := strings.IndexByte(s, '\'')
+	if i < 0 {
+		return nil, false
+	}
+	j := i + 1
+	for j < len(s) && s[j] != '\'' {
+		j++
+	}
+	if j >= len(s) {
+		return nil, false
+	}
+	lit := strings.TrimSpace(s[i+1 : j])
+	if !strings.HasPrefix(lit, "{") || !strings.HasSuffix(lit, "}") {
+		return nil, false
+	}
+	inner := strings.TrimSpace(lit[1 : len(lit)-1])
+	if inner == "" {
+		return nil, true
+	}
+	var out []string
+	for _, e := range strings.Split(inner, ",") {
+		e = strings.TrimSpace(e)
+		if !isNumericLiteral(e) {
+			e = "'" + strings.ReplaceAll(strings.Trim(e, `"`), "'", "''") + "'"
+		}
+		out = append(out, e)
+	}
+	return out, true
+}
+
+// reWithOrdinality matches the "WITH ORDINALITY" clause SQLite lacks.
+var reWithOrdinality = regexp.MustCompile(`(?i)\s+WITH\s+ORDINALITY`)
+
+// rewriteUnnest strips WITH ORDINALITY and replaces "unnest(...) [AS alias(cols)]"
+// — array expansion with a column-alias list, neither of which SQLite supports —
+// with an empty relation carrying the aliased columns. The calls appear in
+// catalog/dump queries over columns that are empty here, so no rows are lost.
+func rewriteUnnest(sql string) string {
+	sql = reWithOrdinality.ReplaceAllString(sql, "")
+	low := strings.ToLower(sql)
+	for from := 0; ; {
+		i := indexWordCall(low, "unnest", from)
+		if i < 0 {
+			return sql
+		}
+		open := i + len("unnest")
+		for open < len(sql) && sql[open] == ' ' {
+			open++
+		}
+		_, end, ok := readParenArgs(sql, open)
+		if !ok {
+			return sql
+		}
+		args, _, _ := readParenArgs(sql, open)
+		cols, alias, next := []string{"unnest"}, "", end
+		p := skipSpaces(sql, end)
+		if hasWordAt(low, p, "as") {
+			p = skipSpaces(sql, p+2)
+		}
+		as := p
+		for p < len(sql) && isWordByte(sql[p]) {
+			p++
+		}
+		if p > as { // AS alias present
+			alias, next = sql[as:p], p
+			if q := skipSpaces(sql, p); q < len(sql) && sql[q] == '(' {
+				if inner, cend, ok2 := readParenArgs(sql, q); ok2 {
+					cols, next = splitTopLevel(inner), cend
+				}
+			}
+		}
+		col := strings.TrimSpace(cols[0])
+		var b strings.Builder
+		if elems, isArr := arrayLiteralElems(args); isArr && len(elems) > 0 {
+			// unnest('{a,b,c}') -> one row per element (pg_dump drives bulk
+			// catalog fetches this way).
+			b.WriteString("(")
+			for k, e := range elems {
+				if k > 0 {
+					b.WriteString(" UNION ALL ")
+				}
+				b.WriteString("SELECT " + e + " AS " + col)
+			}
+			b.WriteString(")")
+		} else {
+			b.WriteString("(SELECT ")
+			for k, c := range cols {
+				if k > 0 {
+					b.WriteString(", ")
+				}
+				b.WriteString("NULL AS " + strings.TrimSpace(c))
+			}
+			b.WriteString(" WHERE 0)")
+		}
+		if alias != "" {
+			b.WriteString(" " + alias)
+		}
+		repl := b.String()
+		sql = sql[:i] + repl + sql[next:]
+		low = strings.ToLower(sql)
+		from = i + len(repl)
+	}
+}
+
+// rewritePgOptionsToTable replaces pg_options_to_table(...) — a set-returning
+// function pg_dump expands reloptions with — by an empty (option_name,
+// option_value) relation (our tables carry no reloptions).
+func rewritePgOptionsToTable(sql string) string {
+	return replaceCall(sql, "pg_options_to_table",
+		"(SELECT NULL AS option_name, NULL AS option_value WHERE 0)")
+}
+
 // replaceCall replaces every call name(...) — with balanced parentheses — by
 // repl. Matching is case-insensitive and respects word boundaries.
 func replaceCall(sql, name, repl string) string {
@@ -1011,7 +1143,13 @@ func replaceCall(sql, name, repl string) string {
 // index form includes it.
 func rewriteObjectDefs(sql string) string {
 	sql = rewriteFuncCallArg1(sql, "pg_get_indexdef", func(a string) string {
-		return "(SELECT ' USING btree (' || ov_cols || ')' FROM pg_index WHERE indexrelid = " + a + ")"
+		// Full CREATE INDEX so pg_dump emits a restorable statement; psql still
+		// finds " USING " to render its \d index line.
+		return "(SELECT 'CREATE ' || CASE WHEN ix.indisunique THEN 'UNIQUE ' ELSE '' END || 'INDEX '" +
+			" || (SELECT relname FROM pg_class WHERE oid = ix.indexrelid)" +
+			" || ' ON ' || (SELECT relname FROM pg_class WHERE oid = ix.indrelid)" +
+			" || ' USING btree (' || ix.ov_cols || ')'" +
+			" FROM pg_index ix WHERE ix.indexrelid = " + a + ")"
 	})
 	sql = rewriteFuncCallArg1(sql, "pg_get_constraintdef", func(a string) string {
 		return "(SELECT CASE contype" +

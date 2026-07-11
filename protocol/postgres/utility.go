@@ -44,7 +44,7 @@ func interceptUtility(sql string) (*core.ResultSet, bool) {
 	w := firstWordUpper(sql)
 	switch w {
 	case "SET", "RESET", "DISCARD", "LISTEN", "UNLISTEN", "NOTIFY", "DEALLOCATE",
-		"LOAD", "CHECKPOINT", "CLUSTER", "ANALYZE",
+		"LOAD", "CHECKPOINT", "CLUSTER", "ANALYZE", "LOCK",
 		"GRANT", "REVOKE", // SQLite has no per-object privileges; accept as a no-op
 		"COMMENT": // no catalog comments yet; accept so migrations/dumps run
 		return &core.ResultSet{Command: w}, true

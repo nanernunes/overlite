@@ -59,10 +59,13 @@ func sqlQuote(s string) string {
 // runtime-derived) role and database name.
 func metaCatalogViews() []string {
 	return []string{
-		`CREATE TEMP VIEW pg_roles AS SELECT rowid + 16384 AS oid, rolname,
-		 rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication,
+		// The configured role gets oid 10 (Postgres' bootstrap superuser oid), so
+		// object owners (relowner=10 in pg_class) resolve to it for pg_dump.
+		`CREATE TEMP VIEW pg_roles AS SELECT
+		 CASE WHEN rolname = ` + sqlQuote(catalogRole) + ` COLLATE NOCASE THEN 10 ELSE rowid + 16384 END AS oid,
+		 rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication,
 		 -1 AS rolconnlimit, '********' AS rolpassword, NULL AS rolvaliduntil,
-		 rolbypassrls, NULL AS rolconfig
+		 rolbypassrls, NULL AS rolconfig, 1260 AS tableoid
 		 FROM _overlite_roles`,
 		`CREATE TEMP VIEW pg_sequences AS SELECT 'public' AS schemaname, seqname AS sequencename,
 		 ` + sqlQuote(catalogRole) + ` AS sequenceowner, 'bigint' AS data_type,
@@ -188,7 +191,7 @@ func setupConnection(ctx context.Context, exec func(string) error, query func(st
 
 	refs := schemaRefs(attached)
 	for _, stmt := range staticCatalogViews {
-		if err := exec(stmt); err != nil {
+		if err := exec(withTableOID(stmt)); err != nil {
 			return err
 		}
 	}

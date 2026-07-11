@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -25,24 +26,55 @@ func union(name string, refs []schemaRef, tmpl string) string {
 	return "CREATE TEMP VIEW " + name + " AS\n" + strings.Join(parts, "\nUNION ALL\n")
 }
 
+// reViewHeader captures the "CREATE TEMP VIEW <name> AS " prefix and the body.
+var reViewHeader = regexp.MustCompile(`(?is)^(\s*CREATE\s+TEMP\s+VIEW\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:"[^"]+"|\w+)\s+AS\s+)(.*)$`)
+
+// withTableOID wraps a "CREATE TEMP VIEW ... AS <body>" so the view exposes a
+// tableoid column (pg_dump selects it from every catalog). Views that already
+// define one (e.g. pg_type) are left untouched.
+func withTableOID(stmt string) string {
+	m := reViewHeader.FindStringSubmatch(stmt)
+	if m == nil || strings.Contains(strings.ToLower(m[2]), "tableoid") {
+		return stmt
+	}
+	return m[1] + "SELECT _s.*, 0 AS tableoid FROM (" + m[2] + ") _s"
+}
+
+// unionWrap wraps union() so the view exposes extraCols (constant columns
+// pg_dump selects that aren't worth threading through every UNION branch).
+func unionWrap(name, extraCols string, refs []schemaRef, tmpl string) string {
+	parts := make([]string, len(refs))
+	for i, r := range refs {
+		parts[i] = frag(tmpl, r)
+	}
+	return "CREATE TEMP VIEW " + name + " AS SELECT _u.*, " + extraCols +
+		" FROM (\n" + strings.Join(parts, "\nUNION ALL\n") + "\n) _u"
+}
+
+// unionOID is unionWrap with just a constant tableoid column (the catalog's own
+// oid in pg_class), a row's originating-catalog discriminator for pg_dump.
+func unionOID(name string, tableOID int, refs []schemaRef, tmpl string) string {
+	return unionWrap(name, strconv.Itoa(tableOID)+" AS tableoid", refs, tmpl)
+}
+
 // dynamicCatalogViews returns the catalog views that span every attached
 // schema. Rebuilt whenever the set of schemas changes.
 func dynamicCatalogViews(refs []schemaRef) []string {
 	// pg_namespace: fixed system schemas plus one row per real schema.
 	ns := "CREATE TEMP VIEW pg_namespace AS" +
-		" SELECT 11 AS oid,'pg_catalog' AS nspname,10 AS nspowner" +
-		" UNION ALL SELECT 2201,'information_schema',10"
+		" SELECT 11 AS oid,'pg_catalog' AS nspname,10 AS nspowner, 2615 AS tableoid, NULL AS nspacl" +
+		" UNION ALL SELECT 2201,'information_schema',10,2615,NULL"
 	for _, r := range refs {
-		ns += " UNION ALL SELECT " + strconv.Itoa(r.NsOid) + ",'" + r.PgName + "',10"
+		ns += " UNION ALL SELECT " + strconv.Itoa(r.NsOid) + ",'" + r.PgName + "',10,2615,NULL"
 	}
 
 	return []string{
 		ns,
 		pgClassView(refs),
-		union("pg_attribute", refs, pgAttributeTmpl),
-		union("pg_index", refs, pgIndexTmpl),
-		union("pg_constraint", refs, pgConstraintTmpl),
-		union("pg_trigger", refs, pgTriggerTmpl),
+		unionOID("pg_attribute", 1249, refs, pgAttributeTmpl),
+		unionWrap("pg_index", "2610 AS tableoid, 0 AS indnullsnotdistinct", refs, pgIndexTmpl),
+		unionWrap("pg_constraint", "2606 AS tableoid, NULL AS conparentid2, 0 AS conperiod", refs, pgConstraintTmpl),
+		unionWrap("pg_trigger", "2620 AS tableoid, 0 AS tgparentid", refs, pgTriggerTmpl),
 		union(`"information_schema.tables"`, refs, infoTablesTmpl),
 		union(`"information_schema.columns"`, refs, infoColumnsTmpl),
 		union(`"information_schema.table_constraints"`, refs, infoTableConstraintsTmpl),
@@ -121,7 +153,9 @@ func pgClassView(refs []schemaRef) string {
 			parts = append(parts, frag(pgSequenceClassTmpl, r))
 		}
 	}
-	return "CREATE TEMP VIEW pg_class AS\n" + strings.Join(parts, "\nUNION ALL\n")
+	return "CREATE TEMP VIEW pg_class AS SELECT _c.*, 1259 AS tableoid," +
+		" 0 AS relfrozenxid, 0 AS relhasoids, NULL AS relpartbound2, 0 AS relallfrozen FROM (\n" +
+		strings.Join(parts, "\nUNION ALL\n") + "\n) _c"
 }
 
 // pgSequenceClassTmpl adds one pg_class row per sequence (column order matches
@@ -161,7 +195,8 @@ const pgAttributeTmpl = `SELECT CAST(m.rowid + @OFF@ AS INTEGER) AS attrelid, ti
  CASE WHEN ti."notnull"=1 OR ti.pk>0 THEN 1 ELSE 0 END AS attnotnull,
  CASE WHEN ti.dflt_value IS NOT NULL THEN 1 ELSE 0 END AS atthasdef,
  0 AS atthasmissing, '' AS attidentity, '' AS attgenerated, 0 AS attisdropped, 1 AS attislocal,
- 0 AS attinhcount, 0 AS attcollation, NULL AS attacl, NULL AS attoptions
+ 0 AS attinhcount, 0 AS attcollation, NULL AS attacl, NULL AS attoptions,
+ '' AS attcompression, NULL AS attmissingval, 0 AS attispartkey, 0 AS attstorage2
 FROM @DB@.sqlite_master m JOIN pragma_table_info(m.name,'@DB@') ti
 WHERE m.type IN ('table','view') AND m.name NOT LIKE 'sqlite_%' AND m.name NOT GLOB '_overlite_*'`
 

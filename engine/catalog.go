@@ -13,6 +13,36 @@ import (
 	sqlite "modernc.org/sqlite"
 )
 
+// arrayAgg accumulates array_agg() values into a Postgres array literal.
+type arrayAgg struct{ vals []string }
+
+func (a *arrayAgg) Step(_ *sqlite.FunctionContext, args []driver.Value) error {
+	if len(args) > 0 {
+		if args[0] == nil {
+			a.vals = append(a.vals, "NULL")
+		} else {
+			a.vals = append(a.vals, fmt.Sprint(args[0]))
+		}
+	}
+	return nil
+}
+
+func (a *arrayAgg) WindowInverse(_ *sqlite.FunctionContext, _ []driver.Value) error {
+	if len(a.vals) > 0 {
+		a.vals = a.vals[1:]
+	}
+	return nil
+}
+
+func (a *arrayAgg) WindowValue(_ *sqlite.FunctionContext) (driver.Value, error) {
+	if len(a.vals) == 0 {
+		return nil, nil // array_agg over no rows is NULL in Postgres
+	}
+	return "{" + strings.Join(a.vals, ",") + "}", nil
+}
+
+func (a *arrayAgg) Final(_ *sqlite.FunctionContext) {}
+
 // newUUIDv4 returns a random RFC-4122 version-4 UUID string, backing
 // gen_random_uuid()/uuid_generate_v4().
 func newUUIDv4() (string, error) {
@@ -66,6 +96,7 @@ var registerCatalog = sync.OnceFunc(func() {
 		return "PostgreSQL 15.0 (overlite) on overlite, compiled by overlite", nil
 	})
 	scalar("current_schema", 0, func([]driver.Value) (driver.Value, error) { return "public", nil })
+	scalar("current_schemas", -1, func([]driver.Value) (driver.Value, error) { return "{pg_catalog,public}", nil })
 	scalar("current_database", 0, func([]driver.Value) (driver.Value, error) { return catalogDBName, nil })
 	scalar("current_user", 0, func([]driver.Value) (driver.Value, error) { return catalogRole, nil })
 	scalar("session_user", 0, func([]driver.Value) (driver.Value, error) { return catalogRole, nil })
@@ -101,9 +132,21 @@ var registerCatalog = sync.OnceFunc(func() {
 	for _, name := range []string{"pg_get_function_result", "pg_get_function_arguments", "array_to_string"} {
 		scalar(name, -1, func([]driver.Value) (driver.Value, error) { return "", nil })
 	}
-	for _, name := range []string{"array_upper", "array_lower", "array_length", "array_ndims"} {
+	for _, name := range []string{
+		"array_upper", "array_lower", "array_length", "array_ndims",
+		"array_remove", "array_cat", "array_append", "array_prepend",
+		"array_position", "array_positions", "array_replace",
+	} {
 		scalar(name, -1, func([]driver.Value) (driver.Value, error) { return nil, nil })
 	}
+	// array_agg is a real aggregate (pg_dump collects index/constraint columns
+	// with it); it builds a Postgres array literal {a,b,c}.
+	sqlite.MustRegisterFunction("array_agg", &sqlite.FunctionImpl{
+		NArgs: -1,
+		MakeAggregate: func(sqlite.FunctionContext) (sqlite.AggregateFunction, error) {
+			return &arrayAgg{}, nil
+		},
+	})
 
 	// Access-privilege checks: DBeaver filters the object tree with these; we
 	// grant everything (single trusted user).
@@ -123,6 +166,10 @@ var registerCatalog = sync.OnceFunc(func() {
 	scalar("pg_get_partition_constraintdef", -1, func([]driver.Value) (driver.Value, error) { return "", nil })
 	for _, name := range []string{"pg_get_statisticsobjdef", "pg_get_statisticsobjdef_columns"} {
 		scalar(name, -1, func([]driver.Value) (driver.Value, error) { return "", nil })
+	}
+	// ACL helpers pg_dump calls; we don't model privileges, so return NULL/empty.
+	for _, name := range []string{"acldefault", "aclexplode", "aclitemin", "aclitemout"} {
+		scalar(name, -1, func([]driver.Value) (driver.Value, error) { return nil, nil })
 	}
 	scalar("pg_is_in_recovery", 0, func([]driver.Value) (driver.Value, error) { return int64(0), nil })
 	scalar("pg_backend_pid", 0, func([]driver.Value) (driver.Value, error) { return int64(1), nil })
@@ -369,7 +416,7 @@ var staticCatalogViews = []string{
 	// The outer SELECT adds the columns \dT+ and pg_dump read (typacl,
 	// typispreferred, typisdefined, ...) without touching every UNION row.
 	`CREATE TEMP VIEW IF NOT EXISTS pg_type AS
-	 SELECT ov_t.*, NULL AS typacl, 0 AS typispreferred, 1 AS typisdefined,
+	 SELECT ov_t.*, 1247 AS tableoid, NULL AS typacl, 0 AS typispreferred, 1 AS typisdefined,
 	        '-' AS typalign, 'p' AS typstorage, 0 AS typrelid2 FROM (
 	 SELECT 16 AS oid, 'bool' AS typname, 11 AS typnamespace, 10 AS typowner,
 	        'b' AS typtype, 'B' AS typcategory, 1 AS typlen, 0 AS typbyval,
@@ -489,7 +536,67 @@ var staticCatalogViews = []string{
 	`CREATE TEMP VIEW IF NOT EXISTS pg_subscription AS
 	 SELECT 0 AS oid, 0 AS subdbid, '' AS subname WHERE 0`,
 	`CREATE TEMP VIEW IF NOT EXISTS pg_event_trigger AS
-	 SELECT 0 AS oid, '' AS evtname, '' AS evtevent, 10 AS evtowner WHERE 0`,
+	 SELECT 0 AS oid, '' AS evtname, '' AS evtevent, 10 AS evtowner, 'O' AS evtenabled,
+	        0 AS evtfoid, NULL AS evttags WHERE 0`,
+
+	// Foreign-data catalogs: we have none, but pg_dump joins them per relation.
+	`CREATE TEMP VIEW IF NOT EXISTS pg_foreign_table AS
+	 SELECT 0 AS ftrelid, 0 AS ftserver, NULL AS ftoptions WHERE 0`,
+	`CREATE TEMP VIEW IF NOT EXISTS pg_foreign_server AS
+	 SELECT 0 AS oid, '' AS srvname, 10 AS srvowner, 0 AS srvfdw, NULL AS srvtype,
+	        NULL AS srvversion, NULL AS srvacl, NULL AS srvoptions WHERE 0`,
+	`CREATE TEMP VIEW IF NOT EXISTS pg_foreign_data_wrapper AS
+	 SELECT 0 AS oid, '' AS fdwname, 10 AS fdwowner, 0 AS fdwhandler, 0 AS fdwvalidator,
+	        NULL AS fdwacl, NULL AS fdwoptions WHERE 0`,
+	`CREATE TEMP VIEW IF NOT EXISTS pg_transform AS
+	 SELECT 0 AS oid, 0 AS trftype, 0 AS trflang, 0 AS trffromsql, 0 AS trftosql WHERE 0`,
+	`CREATE TEMP VIEW IF NOT EXISTS pg_operator AS
+	 SELECT 0 AS oid, '' AS oprname, 11 AS oprnamespace, 10 AS oprowner, 'b' AS oprkind,
+	        0 AS oprleft, 0 AS oprright, 0 AS oprresult, 0 AS oprcom, 0 AS oprnegate,
+	        0 AS oprcode WHERE 0`,
+	`CREATE TEMP VIEW IF NOT EXISTS pg_opclass AS
+	 SELECT 0 AS oid, 0 AS opcmethod, '' AS opcname, 11 AS opcnamespace, 10 AS opcowner,
+	        0 AS opcfamily, 0 AS opcintype, 1 AS opcdefault, 0 AS opckeytype WHERE 0`,
+	`CREATE TEMP VIEW IF NOT EXISTS pg_opfamily AS
+	 SELECT 0 AS oid, 0 AS opfmethod, '' AS opfname, 11 AS opfnamespace, 10 AS opfowner WHERE 0`,
+	`CREATE TEMP VIEW IF NOT EXISTS pg_conversion AS
+	 SELECT 0 AS oid, '' AS conname, 11 AS connamespace, 10 AS conowner,
+	        0 AS conforencoding, 0 AS contoencoding, 0 AS conproc, 0 AS condefault WHERE 0`,
+	`CREATE TEMP VIEW IF NOT EXISTS pg_aggregate AS
+	 SELECT 0 AS aggfnoid, 'n' AS aggkind, 0 AS aggnumdirectargs, 0 AS aggtransfn,
+	        0 AS aggfinalfn, 0 AS aggtranstype WHERE 0`,
+	`CREATE TEMP VIEW IF NOT EXISTS pg_range AS
+	 SELECT 0 AS rngtypid, 0 AS rngsubtype, 0 AS rngmultitypid, 0 AS rngcollation,
+	        0 AS rngsubopc, 0 AS rngcanonical, 0 AS rngsubdiff WHERE 0`,
+	`CREATE TEMP VIEW IF NOT EXISTS pg_ts_config AS
+	 SELECT 0 AS oid, '' AS cfgname, 11 AS cfgnamespace, 10 AS cfgowner, 0 AS cfgparser WHERE 0`,
+	`CREATE TEMP VIEW IF NOT EXISTS pg_ts_dict AS
+	 SELECT 0 AS oid, '' AS dictname, 11 AS dictnamespace, 10 AS dictowner,
+	        0 AS dicttemplate, NULL AS dictinitoption WHERE 0`,
+	`CREATE TEMP VIEW IF NOT EXISTS pg_ts_parser AS
+	 SELECT 0 AS oid, '' AS prsname, 11 AS prsnamespace, 0 AS prsstart, 0 AS prstoken,
+	        0 AS prsend, 0 AS prsheadline, 0 AS prslextype WHERE 0`,
+	`CREATE TEMP VIEW IF NOT EXISTS pg_ts_template AS
+	 SELECT 0 AS oid, '' AS tmplname, 11 AS tmplnamespace, 0 AS tmplinit, 0 AS tmpllexize WHERE 0`,
+	`CREATE TEMP VIEW IF NOT EXISTS pg_seclabels AS
+	 SELECT 0 AS objoid, 0 AS classoid, 0 AS objsubid, '' AS objtype, 0 AS objnamespace,
+	        '' AS objname, '' AS provider, '' AS label WHERE 0`,
+	`CREATE TEMP VIEW IF NOT EXISTS pg_seclabel AS
+	 SELECT 0 AS objoid, 0 AS classoid, 0 AS objsubid, '' AS provider, '' AS label WHERE 0`,
+	`CREATE TEMP VIEW IF NOT EXISTS pg_shseclabel AS
+	 SELECT 0 AS objoid, 0 AS classoid, '' AS provider, '' AS label WHERE 0`,
+	`CREATE TEMP VIEW IF NOT EXISTS pg_amproc AS
+	 SELECT 0 AS oid, 0 AS amprocfamily, 0 AS amproclefttype, 0 AS amprocrighttype,
+	        0 AS amprocnum, 0 AS amproc WHERE 0`,
+	`CREATE TEMP VIEW IF NOT EXISTS pg_amop AS
+	 SELECT 0 AS oid, 0 AS amopfamily, 0 AS amoplefttype, 0 AS amoprighttype, 0 AS amopstrategy,
+	        'a' AS amoppurpose, 0 AS amopopr, 0 AS amopmethod, 0 AS amopsortfamily WHERE 0`,
+	`CREATE TEMP VIEW IF NOT EXISTS pg_cast AS
+	 SELECT 0 AS oid, 0 AS castsource, 0 AS casttarget, 0 AS castfunc,
+	        'e' AS castcontext, 'f' AS castmethod WHERE 0`,
+	`CREATE TEMP VIEW IF NOT EXISTS pg_language AS
+	 SELECT 0 AS oid, '' AS lanname, 10 AS lanowner, 0 AS lanispl, 0 AS lanpltrusted,
+	        0 AS lanplcallfoid, 0 AS laninline, 0 AS lanvalidator, NULL AS lanacl WHERE 0`,
 
 	`CREATE TEMP VIEW IF NOT EXISTS pg_settings AS
 	 SELECT '' AS name, '' AS setting, '' AS unit, '' AS category, '' AS short_desc,
@@ -509,6 +616,10 @@ var staticCatalogViews = []string{
 	`CREATE TEMP VIEW IF NOT EXISTS pg_proc AS
 	 SELECT 0 AS oid, '' AS proname, 11 AS pronamespace, 10 AS proowner,
 	        0 AS prolang, 'f' AS prokind, 0 AS prorettype, '' AS proargtypes,
-	        0 AS pronargs, 0 AS proretset
+	        0 AS pronargs, 0 AS proretset, NULL AS proacl, '' AS prosrc, NULL AS probin,
+	        'v' AS provolatile, 0 AS proisstrict, NULL AS proargmodes, NULL AS proargnames,
+	        NULL AS proallargtypes, 0 AS prosecdef, NULL AS proconfig, 100 AS procost,
+	        0 AS prorows, 0 AS provariadic, 0 AS prosupport, 0 AS proleakproof,
+	        's' AS proparallel, NULL AS proargdefaults, 0 AS pronargdefaults, '' AS prosqlbody
 	 WHERE 0`,
 }
