@@ -97,7 +97,7 @@ for a real production system**. ✅ done · 🟡 partial · ⬜ not yet.
 | Numeric precision | 🟡 | SQLite affinity; not exact fixed-point (money) |
 | Timestamps with time zone | 🟡 | stored as text; no real `timestamptz` / tz math |
 | Backup / restore | 🟡 | `\copy` works; `pg_dump` dumps data but not full schema |
-| Roles & permissions | ⬜ | single user; no `GRANT`/`REVOKE`/row-level security |
+| Roles & permissions | 🟡 | `CREATE`/`ALTER`/`DROP ROLE`/`USER` in `\du`; `GRANT`/`REVOKE` accepted as no-ops; no enforcement or row-level security |
 | Server-side logic | ⬜ | PL/pgSQL functions & procedures (triggers only in SQLite syntax) |
 | Sequences | ⬜ | `SERIAL` works; no explicit `CREATE SEQUENCE`/`nextval` |
 | Rich types | ⬜ | arrays, `uuid`, `enum`, ranges, `interval` arithmetic |

@@ -59,10 +59,11 @@ func sqlQuote(s string) string {
 // runtime-derived) role and database name.
 func metaCatalogViews() []string {
 	return []string{
-		`CREATE TEMP VIEW pg_roles AS SELECT 10 AS oid, ` + sqlQuote(catalogRole) + ` AS rolname,
-		 1 AS rolsuper, 1 AS rolinherit, 1 AS rolcreaterole, 1 AS rolcreatedb, 1 AS rolcanlogin,
-		 0 AS rolreplication, -1 AS rolconnlimit, '********' AS rolpassword, NULL AS rolvaliduntil,
-		 1 AS rolbypassrls, NULL AS rolconfig`,
+		`CREATE TEMP VIEW pg_roles AS SELECT rowid + 16384 AS oid, rolname,
+		 rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication,
+		 -1 AS rolconnlimit, '********' AS rolpassword, NULL AS rolvaliduntil,
+		 rolbypassrls, NULL AS rolconfig
+		 FROM _overlite_roles`,
 		`CREATE TEMP VIEW pg_database AS SELECT 1 AS oid, ` + sqlQuote(catalogDBName) + ` AS datname,
 		 10 AS datdba, 6 AS encoding, 'c' AS datlocprovider, 'C' AS datcollate, 'C' AS datctype,
 		 NULL AS daticulocale, NULL AS daticurules, NULL AS datcollversion,
@@ -147,6 +148,15 @@ func setupConnection(ctx context.Context, exec func(string) error, query func(st
 	// The set of attached schemas is the source of truth.
 	if names, err := query("SELECT name FROM pragma_database_list WHERE name NOT IN ('main','temp')"); err == nil {
 		attached = names
+	}
+
+	// The internal roles table (pg_roles reads from it) must exist before the
+	// meta views are built.
+	if err := exec(rolesTableDDL); err != nil {
+		return err
+	}
+	if err := exec(seedDefaultRoleSQL()); err != nil {
+		return err
 	}
 
 	refs := schemaRefs(attached)

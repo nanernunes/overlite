@@ -157,6 +157,16 @@ func (s *session) handleSimpleQuery(body []byte) error {
 			"current transaction is aborted, commands ignored until end of transaction block")
 	}
 
+	if tag, handled, err := s.tryRoleDDL(sql); handled {
+		if err != nil {
+			if s.tx != nil {
+				s.txFailed = true
+			}
+			return s.c.sendError("42000", err.Error())
+		}
+		return s.c.sendCommandComplete(tag)
+	}
+
 	if cs, ok := parseCopy(sql); ok {
 		return s.handleCopy(cs)
 	}

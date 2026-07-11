@@ -59,13 +59,13 @@ const pgClassTmpl = `SELECT CAST(m.rowid + @OFF@ AS INTEGER) AS oid, m.name AS r
  0 AS relforcerowsecurity, 1 AS relispopulated, 'd' AS relreplident, 0 AS relispartition,
  NULL AS relacl, NULL AS reloptions, NULL AS relpartbound, 0 AS relrewrite, 0 AS relminmxid
 FROM @DB@.sqlite_master m
-WHERE m.type IN ('table','view','index') AND m.name NOT LIKE 'sqlite_%'
+WHERE m.type IN ('table','view','index') AND m.name NOT LIKE 'sqlite_%' AND m.name NOT GLOB '_overlite_*'
 UNION ALL
 SELECT CAST(tbl.rowid + 90000000 + @OFF@ AS INTEGER), tbl.name || '_pkey', @NS@, 0,0,10,403,0,0,0,0,0,0,0,0,'p','i',
  (SELECT count(*) FROM pragma_table_info(tbl.name,'@DB@') WHERE pk>0),
  0,0,0,0,0,0,1,'n',0,NULL,NULL,NULL,0,0
 FROM @DB@.sqlite_master tbl
-WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%'
+WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%' AND tbl.name NOT GLOB '_overlite_*'
   AND EXISTS(SELECT 1 FROM pragma_table_info(tbl.name,'@DB@') WHERE pk>0)`
 
 const pgAttributeTmpl = `SELECT CAST(m.rowid + @OFF@ AS INTEGER) AS attrelid, ti.name AS attname, overlite_type_oid(ti.type) AS atttypid,
@@ -76,7 +76,7 @@ const pgAttributeTmpl = `SELECT CAST(m.rowid + @OFF@ AS INTEGER) AS attrelid, ti
  0 AS atthasmissing, '' AS attidentity, '' AS attgenerated, 0 AS attisdropped, 1 AS attislocal,
  0 AS attinhcount, 0 AS attcollation, NULL AS attacl, NULL AS attoptions
 FROM @DB@.sqlite_master m JOIN pragma_table_info(m.name,'@DB@') ti
-WHERE m.type IN ('table','view') AND m.name NOT LIKE 'sqlite_%'`
+WHERE m.type IN ('table','view') AND m.name NOT LIKE 'sqlite_%' AND m.name NOT GLOB '_overlite_*'`
 
 const pgIndexTmpl = `SELECT idx.rowid + @OFF@ AS indexrelid, tbl.rowid + @OFF@ AS indrelid,
  (SELECT count(*) FROM pragma_index_info(idx.name,'@DB@')) AS indnatts,
@@ -90,7 +90,7 @@ const pgIndexTmpl = `SELECT idx.rowid + @OFF@ AS indexrelid, tbl.rowid + @OFF@ A
 FROM @DB@.sqlite_master idx
 JOIN @DB@.sqlite_master tbl ON tbl.name = idx.tbl_name AND tbl.type='table'
 JOIN pragma_index_list(tbl.name,'@DB@') il ON il.name = idx.name
-WHERE idx.type='index' AND idx.name NOT LIKE 'sqlite_%'
+WHERE idx.type='index' AND idx.name NOT LIKE 'sqlite_%' AND idx.name NOT GLOB '_overlite_*'
 UNION ALL
 SELECT tbl.rowid + 90000000 + @OFF@, tbl.rowid + @OFF@,
  (SELECT count(*) FROM pragma_table_info(tbl.name,'@DB@') WHERE pk>0),
@@ -100,7 +100,7 @@ SELECT tbl.rowid + 90000000 + @OFF@, tbl.rowid + @OFF@,
  '','','',NULL,NULL,
  (SELECT group_concat(name,', ') FROM pragma_table_info(tbl.name,'@DB@') WHERE pk>0 ORDER BY pk)
 FROM @DB@.sqlite_master tbl
-WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%'
+WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%' AND tbl.name NOT GLOB '_overlite_*'
   AND EXISTS(SELECT 1 FROM pragma_table_info(tbl.name,'@DB@') WHERE pk>0)`
 
 const pgConstraintTmpl = `SELECT tbl.rowid*100000 + fk.id + @OFF@ AS oid, 'fk_' || tbl.name || '_' || fk.id AS conname,
@@ -111,21 +111,21 @@ const pgConstraintTmpl = `SELECT tbl.rowid*100000 + fk.id + @OFF@ AS oid, 'fk_' 
  1 AS connoinherit, '' AS conkey, '' AS confkey, NULL AS conbin,
  fk."from" AS ov_cols, fk."table" || '(' || fk."to" || ')' AS ov_ref
 FROM @DB@.sqlite_master tbl JOIN pragma_foreign_key_list(tbl.name,'@DB@') fk
-WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%'
+WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%' AND tbl.name NOT GLOB '_overlite_*'
 UNION ALL
 SELECT tbl.rowid*100000 + 99999 + @OFF@, tbl.name || '_pkey', @NS@, 'p', 0,0,1,
  CAST(tbl.rowid + @OFF@ AS INTEGER), 0,0,0,0, ' ',' ',' ', 1,0,1, '','',NULL,
  (SELECT group_concat(name,', ') FROM pragma_table_info(tbl.name,'@DB@') WHERE pk>0 ORDER BY pk), NULL
 FROM @DB@.sqlite_master tbl
-WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%'
+WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%' AND tbl.name NOT GLOB '_overlite_*'
   AND EXISTS(SELECT 1 FROM pragma_table_info(tbl.name,'@DB@') WHERE pk>0)`
 
 const infoTablesTmpl = `SELECT 'main' AS table_catalog, '@PG@' AS table_schema, name AS table_name,
  CASE type WHEN 'view' THEN 'VIEW' ELSE 'BASE TABLE' END AS table_type
-FROM @DB@.sqlite_master WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%'`
+FROM @DB@.sqlite_master WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%' AND name NOT GLOB '_overlite_*'`
 
 const infoColumnsTmpl = `SELECT 'main' AS table_catalog, '@PG@' AS table_schema, m.name AS table_name,
  ti.name AS column_name, ti.cid + 1 AS ordinal_position, ti.type AS data_type,
  CASE ti."notnull" WHEN 1 THEN 'NO' ELSE 'YES' END AS is_nullable
 FROM @DB@.sqlite_master m JOIN pragma_table_info(m.name,'@DB@') ti
-WHERE m.type='table' AND m.name NOT LIKE 'sqlite_%'`
+WHERE m.type='table' AND m.name NOT LIKE 'sqlite_%' AND m.name NOT GLOB '_overlite_*'`

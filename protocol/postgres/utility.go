@@ -42,7 +42,8 @@ func logQueryError(phase string, err error, original, rewritten string) {
 // engine; transaction control is a no-op for now (writes autocommit).
 func interceptUtility(sql string) (*core.ResultSet, bool) {
 	switch firstWordUpper(sql) {
-	case "SET", "RESET", "DISCARD", "LISTEN", "UNLISTEN", "DEALLOCATE", "LOAD", "CHECKPOINT":
+	case "SET", "RESET", "DISCARD", "LISTEN", "UNLISTEN", "DEALLOCATE", "LOAD", "CHECKPOINT",
+		"GRANT", "REVOKE": // SQLite has no per-object privileges; accept as a no-op
 		return &core.ResultSet{Command: firstWordUpper(sql)}, true
 	case "SHOW":
 		return showResult(sql), true
