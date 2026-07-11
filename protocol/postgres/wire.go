@@ -44,6 +44,7 @@ const (
 	msgCopyData             = 'd' // both directions
 	msgCopyDone             = 'c' // both directions
 	msgCopyFail             = 'f' // frontend
+	msgPortalSuspended      = 's' // Execute stopped at max-rows; more rows remain
 )
 
 // Magic protocol codes carried in the first int32 after the startup length.

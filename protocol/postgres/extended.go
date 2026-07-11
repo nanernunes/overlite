@@ -58,6 +58,12 @@ type portal struct {
 	prep    *prepared
 	params  []core.Value
 	formats []int // result-column format codes from Bind
+
+	// result and pos support partial fetch (Execute's max-rows): the query runs
+	// once, then successive Executes page through the buffered rows, emitting
+	// PortalSuspended until they are exhausted.
+	result *core.ResultSet
+	pos    int
 }
 
 func newSession(ctx context.Context, c *wireConn, db core.Session) *session {
@@ -386,7 +392,7 @@ func (s *session) handleDescribe(body []byte) error {
 func (s *session) handleExecute(body []byte) error {
 	r := newReader(body)
 	portalName := r.cstring()
-	r.int32() // max rows; ignored (we always return the full result)
+	maxRows := r.int32() // 0 = no limit
 	if r.err != nil {
 		return s.protoError("08P01", "malformed Execute message")
 	}
@@ -452,33 +458,57 @@ func (s *session) handleExecute(body []byte) error {
 		return s.c.sendCommandComplete(commandTag(u))
 	}
 
-	execSQL, err := s.rewriteForExec(pt.prep.raw)
-	if err != nil {
-		if s.tx != nil {
-			s.txFailed = true
+	// Run the query once; successive Executes on the same portal page through
+	// the buffered rows (partial fetch).
+	if pt.result == nil {
+		execSQL, err := s.rewriteForExec(pt.prep.raw)
+		if err != nil {
+			if s.tx != nil {
+				s.txFailed = true
+			}
+			return s.protoError("42P01", err.Error())
 		}
-		return s.protoError("42P01", err.Error())
+		rs, err := s.exec(execSQL, pt.params)
+		if err != nil {
+			logQueryError("execute", err, execSQL, pt.prep.sql)
+			if s.tx != nil {
+				s.txFailed = true
+			}
+			return s.protoError("42000", err.Error())
+		}
+		pt.result, pt.pos = rs, 0
 	}
-	rs, err := s.exec(execSQL, pt.params)
-	if err != nil {
-		logQueryError("execute", err, execSQL, pt.prep.sql)
-		if s.tx != nil {
-			s.txFailed = true
-		}
-		return s.protoError("42000", err.Error())
+
+	rs := pt.result
+	if !rs.IsQuery {
+		s.resetPortal(pt)
+		return s.c.sendCommandComplete(commandTag(rs))
 	}
-	if rs.IsQuery {
-		// Extended protocol: DataRows only. The RowDescription was already
-		// sent in reply to Describe.
-		oids := make([]uint32, len(rs.Columns))
-		for i, col := range rs.Columns {
-			oids[i] = oidForColumn(col, rs.Rows, i)
-		}
-		if err := s.c.sendDataRows(rs.Rows, oids, pt.formats); err != nil {
-			return err
-		}
+
+	// Extended protocol: DataRows only (the RowDescription went out at Describe).
+	oids := make([]uint32, len(rs.Columns))
+	for i, col := range rs.Columns {
+		oids[i] = oidForColumn(col, rs.Rows, i)
 	}
-	return s.c.sendCommandComplete(commandTag(rs))
+	end := len(rs.Rows)
+	if maxRows > 0 && pt.pos+maxRows < end {
+		end = pt.pos + maxRows
+	}
+	if err := s.c.sendDataRows(rs.Rows[pt.pos:end], oids, pt.formats); err != nil {
+		return err
+	}
+	pt.pos = end
+	if pt.pos < len(rs.Rows) {
+		return s.c.send(msgPortalSuspended, nil) // more rows await another Execute
+	}
+	tag := commandTag(rs)
+	s.resetPortal(pt)
+	return s.c.sendCommandComplete(tag)
+}
+
+// resetPortal clears a portal's buffered result so a later Execute re-runs it.
+func (s *session) resetPortal(pt *portal) {
+	pt.result, pt.pos = nil, 0
 }
 
 func (s *session) handleClose(body []byte) error {
