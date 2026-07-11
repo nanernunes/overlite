@@ -298,8 +298,10 @@ func rewriteSerial(sql string) string {
 	if h := firstWordUpper(sql); h != "CREATE" && h != "ALTER" {
 		return sql
 	}
-	sql = reSerialPK.ReplaceAllString(sql, "INTEGER PRIMARY KEY AUTOINCREMENT")
-	return reSerial.ReplaceAllString(sql, "INTEGER")
+	return mapOutsideStrings(sql, func(code string) string {
+		code = reSerialPK.ReplaceAllString(code, "INTEGER PRIMARY KEY AUTOINCREMENT")
+		return reSerial.ReplaceAllString(code, "INTEGER")
+	})
 }
 
 // reNowFuncs maps the Postgres "current timestamp" niladic functions onto
@@ -308,7 +310,9 @@ func rewriteSerial(sql string) string {
 var reNowFuncs = regexp.MustCompile(`(?i)\b(?:now|transaction_timestamp|statement_timestamp|clock_timestamp)\s*\(\s*\)`)
 
 func rewriteNow(sql string) string {
-	return reNowFuncs.ReplaceAllString(sql, "datetime('now')")
+	return mapOutsideStrings(sql, func(code string) string {
+		return reNowFuncs.ReplaceAllString(code, "datetime('now')")
+	})
 }
 
 // rewriteExtract turns "extract(field FROM ts)" into the date_part('field', ts)
@@ -388,12 +392,14 @@ var jsonFuncMap = map[string]string{
 var reJSONFunc = regexp.MustCompile(`(?i)\b(json_build_object|jsonb_build_object|json_build_array|jsonb_build_array|json_object_agg|jsonb_object_agg|json_agg|jsonb_agg|json_typeof|jsonb_typeof|jsonb_array_length|to_jsonb|to_json|jsonb_pretty|jsonb_set|jsonb_insert)\s*\(`)
 
 func rewriteJSONFuncs(sql string) string {
-	return reJSONFunc.ReplaceAllStringFunc(sql, func(m string) string {
-		name := strings.ToLower(strings.TrimSpace(m[:strings.IndexByte(m, '(')]))
-		if repl, ok := jsonFuncMap[name]; ok {
-			return repl + "("
-		}
-		return m
+	return mapOutsideStrings(sql, func(code string) string {
+		return reJSONFunc.ReplaceAllStringFunc(code, func(m string) string {
+			name := strings.ToLower(strings.TrimSpace(m[:strings.IndexByte(m, '(')]))
+			if repl, ok := jsonFuncMap[name]; ok {
+				return repl + "("
+			}
+			return m
+		})
 	})
 }
 
@@ -471,13 +477,69 @@ func isAllDigits(s string) bool {
 	return s != ""
 }
 
-// reEscapeString matches the Postgres escape-string prefix (E'...'), which
-// SQLite lacks. Dropping the E leaves a normal string literal — good enough
-// for the catalog queries that use it (e.g. E'\n' separators).
-var reEscapeString = regexp.MustCompile(`(?i)\bE'`)
-
+// rewriteEscapeStrings drops the Postgres escape-string prefix (E'...'), which
+// SQLite lacks, leaving a normal string literal — good enough for the catalog
+// queries that use it (e.g. E'\n' separators). It scans string literals so a
+// lone e that is merely the content of a string (e.g. nextval('e')) is left
+// alone: only an E/e immediately preceding the opening quote of a literal, at a
+// word boundary, is treated as a prefix and removed.
 func rewriteEscapeStrings(sql string) string {
-	return reEscapeString.ReplaceAllString(sql, "'")
+	var b strings.Builder
+	for i := 0; i < len(sql); {
+		c := sql[i]
+		if c == '\'' {
+			j := endOfStringLiteral(sql, i)
+			b.WriteString(sql[i:j])
+			i = j
+			continue
+		}
+		if (c == 'E' || c == 'e') && i+1 < len(sql) && sql[i+1] == '\'' &&
+			(i == 0 || !isWordByte(sql[i-1])) {
+			i++ // drop the prefix; the next iteration copies the literal itself
+			continue
+		}
+		b.WriteByte(c)
+		i++
+	}
+	return b.String()
+}
+
+// endOfStringLiteral returns the index just past the single-quoted string
+// literal that starts at i (with ” treated as an escaped quote).
+func endOfStringLiteral(sql string, i int) int {
+	j := i + 1
+	for j < len(sql) {
+		if sql[j] == '\'' {
+			if j+1 < len(sql) && sql[j+1] == '\'' {
+				j += 2
+				continue
+			}
+			return j + 1
+		}
+		j++
+	}
+	return j
+}
+
+// mapOutsideStrings applies fn to every stretch of sql that lies outside a
+// single-quoted string literal, copying the literals through verbatim. It lets
+// the naive substitution rules run without ever rewriting text that is merely
+// the content of a string.
+func mapOutsideStrings(sql string, fn func(code string) string) string {
+	var b strings.Builder
+	i, codeStart := 0, 0
+	for i < len(sql) {
+		if sql[i] == '\'' {
+			b.WriteString(fn(sql[codeStart:i]))
+			j := endOfStringLiteral(sql, i)
+			b.WriteString(sql[i:j])
+			i, codeStart = j, j
+			continue
+		}
+		i++
+	}
+	b.WriteString(fn(sql[codeStart:]))
+	return b.String()
 }
 
 // reNiladic matches SQL niladic special functions that Postgres allows without
@@ -486,28 +548,31 @@ var reNiladic = regexp.MustCompile(`(?i)\b(current_user|session_user|current_rol
 
 // rewriteNiladicFuncs appends "()" to a bare niladic function so SQLite treats
 // it as a call, skipping matches that are quoted, qualified, or already called.
+// It runs outside string literals so a match inside a string is left alone.
 func rewriteNiladicFuncs(sql string) string {
-	var b strings.Builder
-	last := 0
-	for _, loc := range reNiladic.FindAllStringIndex(sql, -1) {
-		b.WriteString(sql[last:loc[1]])
-		last = loc[1]
-		if loc[0] > 0 {
-			if p := sql[loc[0]-1]; p == '"' || p == '\'' || p == '.' {
-				continue // quoted identifier, string, or qualified name
+	return mapOutsideStrings(sql, func(code string) string {
+		var b strings.Builder
+		last := 0
+		for _, loc := range reNiladic.FindAllStringIndex(code, -1) {
+			b.WriteString(code[last:loc[1]])
+			last = loc[1]
+			if loc[0] > 0 {
+				if p := code[loc[0]-1]; p == '"' || p == '.' {
+					continue // quoted identifier or qualified name
+				}
 			}
+			j := loc[1]
+			for j < len(code) && code[j] == ' ' {
+				j++
+			}
+			if j < len(code) && code[j] == '(' {
+				continue // already a call
+			}
+			b.WriteString("()")
 		}
-		j := loc[1]
-		for j < len(sql) && sql[j] == ' ' {
-			j++
-		}
-		if j < len(sql) && sql[j] == '(' {
-			continue // already a call
-		}
-		b.WriteString("()")
-	}
-	b.WriteString(sql[last:])
-	return b.String()
+		b.WriteString(code[last:])
+		return b.String()
+	})
 }
 
 // reInfoSchema matches references to the emulated information_schema so they
@@ -515,8 +580,10 @@ func rewriteNiladicFuncs(sql string) string {
 var reInfoSchema = regexp.MustCompile(`(?i)\binformation_schema\.(tables|columns)\b`)
 
 func rewriteInformationSchema(sql string) string {
-	return reInfoSchema.ReplaceAllStringFunc(sql, func(m string) string {
-		return `"` + strings.ToLower(m) + `"`
+	return mapOutsideStrings(sql, func(code string) string {
+		return reInfoSchema.ReplaceAllStringFunc(code, func(m string) string {
+			return `"` + strings.ToLower(m) + `"`
+		})
 	})
 }
 
@@ -526,7 +593,9 @@ func rewriteInformationSchema(sql string) string {
 var reArraySubquery = regexp.MustCompile(`(?i)\barray\s*\(\s*(select\b)`)
 
 func rewriteArraySubquery(sql string) string {
-	return reArraySubquery.ReplaceAllString(sql, "(${1}")
+	return mapOutsideStrings(sql, func(code string) string {
+		return reArraySubquery.ReplaceAllString(code, "(${1}")
+	})
 }
 
 // reAnyArray matches "= ANY (ARRAY[...])" / "<> ALL (ARRAY[...])", the array
@@ -536,6 +605,8 @@ var (
 	reAllArray = regexp.MustCompile(`(?is)\s*(?:<>|!=)\s*all\s*\(\s*array\s*\[([^\]]*)\]\s*\)`)
 )
 
+// Not string-literal-wrapped: the ARRAY[...] elements are themselves string
+// literals, so the match legitimately spans quotes.
 func rewriteAnyArray(sql string) string {
 	sql = reAnyArray.ReplaceAllString(sql, " IN ($1)")
 	return reAllArray.ReplaceAllString(sql, " NOT IN ($1)")
@@ -546,7 +617,9 @@ func rewriteAnyArray(sql string) string {
 var reAnyOperator = regexp.MustCompile(`(?i)\s*=\s*any\s*\(`)
 
 func rewriteAnyOperator(sql string) string {
-	return reAnyOperator.ReplaceAllString(sql, " IN (")
+	return mapOutsideStrings(sql, func(code string) string {
+		return reAnyOperator.ReplaceAllString(code, " IN (")
+	})
 }
 
 // reArraySubscript matches a Postgres array subscript directly attached to an
@@ -556,14 +629,18 @@ func rewriteAnyOperator(sql string) string {
 var reArraySubscript = regexp.MustCompile(`[A-Za-z_]\w*\[[^\]]*\]`)
 
 func rewriteArraySubscript(sql string) string {
-	return reArraySubscript.ReplaceAllString(sql, "NULL")
+	return mapOutsideStrings(sql, func(code string) string {
+		return reArraySubscript.ReplaceAllString(code, "NULL")
+	})
 }
 
 // reStringAgg maps Postgres string_agg() onto SQLite's group_concat().
 var reStringAgg = regexp.MustCompile(`(?i)\bstring_agg\s*\(`)
 
 func rewriteStringAgg(sql string) string {
-	return reStringAgg.ReplaceAllString(sql, "group_concat(")
+	return mapOutsideStrings(sql, func(code string) string {
+		return reStringAgg.ReplaceAllString(code, "group_concat(")
+	})
 }
 
 // rewriteGenerateSeries replaces generate_series(...) — a set-returning
@@ -701,7 +778,9 @@ func isWordByte(b byte) bool {
 var rePgCatalog = regexp.MustCompile(`(?i)\bpg_catalog\.`)
 
 func rewritePgCatalogPrefix(sql string) string {
-	return rePgCatalog.ReplaceAllString(sql, "")
+	return mapOutsideStrings(sql, func(code string) string {
+		return rePgCatalog.ReplaceAllString(code, "")
+	})
 }
 
 // rePublic matches a "public." (or "public".) schema qualifier. Clients think
@@ -710,7 +789,9 @@ func rewritePgCatalogPrefix(sql string) string {
 var rePublic = regexp.MustCompile(`(?i)"?\bpublic\b"?\.`)
 
 func rewritePublicPrefix(sql string) string {
-	return rePublic.ReplaceAllString(sql, "")
+	return mapOutsideStrings(sql, func(code string) string {
+		return rePublic.ReplaceAllString(code, "")
+	})
 }
 
 // reOperatorCall matches Postgres' explicit operator syntax, e.g.
@@ -720,12 +801,14 @@ var reOperatorCall = regexp.MustCompile(`(?i)OPERATOR\s*\(\s*([^)]+?)\s*\)`)
 // rewriteOperatorSyntax unwraps OPERATOR(...) back to the bare operator so the
 // rest of the dialect layer (and SQLite) can handle it.
 func rewriteOperatorSyntax(sql string) string {
-	return reOperatorCall.ReplaceAllStringFunc(sql, func(m string) string {
-		inner := reOperatorCall.FindStringSubmatch(m)[1]
-		if i := strings.LastIndex(inner, "."); i >= 0 { // drop any schema qualifier
-			inner = inner[i+1:]
-		}
-		return " " + inner + " "
+	return mapOutsideStrings(sql, func(code string) string {
+		return reOperatorCall.ReplaceAllStringFunc(code, func(m string) string {
+			inner := reOperatorCall.FindStringSubmatch(m)[1]
+			if i := strings.LastIndex(inner, "."); i >= 0 { // drop any schema qualifier
+				inner = inner[i+1:]
+			}
+			return " " + inner + " "
+		})
 	})
 }
 
@@ -734,7 +817,9 @@ func rewriteOperatorSyntax(sql string) string {
 var reCollate = regexp.MustCompile(`(?i)\s+COLLATE\s+"?(?:default|c|posix)"?`)
 
 func rewriteCollate(sql string) string {
-	return reCollate.ReplaceAllString(sql, "")
+	return mapOutsideStrings(sql, func(code string) string {
+		return reCollate.ReplaceAllString(code, "")
+	})
 }
 
 // rewriteMatchOperators maps Postgres POSIX-regex operators onto SQLite's

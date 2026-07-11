@@ -136,6 +136,24 @@ func TestRewriteEscapeStrings(t *testing.T) {
 	assert.Equal(t, `array_to_string(x, '\n')`, rewriteEscapeStrings(`array_to_string(x, E'\n')`))
 	assert.Equal(t, `SELECT '\t', a`, rewriteEscapeStrings(`SELECT E'\t', a`))
 	assert.Equal(t, "SELECT 'plain'", rewriteEscapeStrings("SELECT 'plain'")) // untouched
+	// A lone e inside a string literal is content, not an E'' prefix.
+	assert.Equal(t, "SELECT nextval('e')", rewriteEscapeStrings("SELECT nextval('e')"))
+	assert.Equal(t, "SELECT ' escape '", rewriteEscapeStrings("SELECT ' escape '"))
+	// e prefixing a real string still gets dropped even mid-identifier boundary.
+	assert.Equal(t, `WHERE x = 'y'`, rewriteEscapeStrings(`WHERE x = E'y'`))
+}
+
+// TestRewriteStringLiteralAware verifies rewrite rules never touch text that
+// lives inside a string literal.
+func TestRewriteStringLiteralAware(t *testing.T) {
+	// A quoted sequence name ending in a lone e survives the full pipeline.
+	assert.Equal(t, "SELECT nextval('e')", rewrite("SELECT nextval('e')"))
+	// Keywords/qualifiers inside a string literal are left alone.
+	assert.Equal(t, "SELECT 'public.users'", rewrite("SELECT 'public.users'"))
+	assert.Equal(t, "SELECT 'now()'", rewrite("SELECT 'now()'"))
+	assert.Equal(t, "SELECT 'pg_catalog.x'", rewrite("SELECT 'pg_catalog.x'"))
+	assert.Equal(t, "INSERT INTO t VALUES ('a serial number')",
+		rewrite("INSERT INTO t VALUES ('a serial number')"))
 }
 
 func TestRewritePublicPrefix(t *testing.T) {
