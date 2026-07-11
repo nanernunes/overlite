@@ -25,7 +25,7 @@ func (s *session) tryRoleDDL(sql string) (tag string, handled bool, err error) {
 		if !isRole {
 			return "", false, nil
 		}
-		return "CREATE ROLE", true, s.createRole(fields, obj)
+		return "CREATE ROLE", true, s.createRole(sql, fields, obj)
 	case "ALTER":
 		if obj == "DEFAULT" { // ALTER DEFAULT PRIVILEGES — accept, no-op
 			return "ALTER DEFAULT PRIVILEGES", true, nil
@@ -33,7 +33,7 @@ func (s *session) tryRoleDDL(sql string) (tag string, handled bool, err error) {
 		if !isRole {
 			return "", false, nil
 		}
-		return "ALTER ROLE", true, s.alterRole(fields)
+		return "ALTER ROLE", true, s.alterRole(sql, fields)
 	case "DROP":
 		if !isRole {
 			return "", false, nil
@@ -43,7 +43,7 @@ func (s *session) tryRoleDDL(sql string) (tag string, handled bool, err error) {
 	return "", false, nil
 }
 
-func (s *session) createRole(fields []string, obj string) error {
+func (s *session) createRole(sql string, fields []string, obj string) error {
 	if len(fields) < 3 {
 		return fmt.Errorf("syntax error in CREATE %s", obj)
 	}
@@ -61,12 +61,21 @@ func (s *session) createRole(fields []string, obj string) error {
 		ph = append(ph, "?")
 		vals = append(vals, v)
 	}
-	sql := "INSERT INTO _overlite_roles (" + strings.Join(cols, ",") + ") VALUES (" + strings.Join(ph, ",") + ")"
-	_, err := s.exec(sql, vals)
+	if pw, ok := extractPassword(sql); ok {
+		verifier, err := buildSCRAMVerifier(pw)
+		if err != nil {
+			return err
+		}
+		cols = append(cols, "rolpassword")
+		ph = append(ph, "?")
+		vals = append(vals, verifier)
+	}
+	q := "INSERT INTO _overlite_roles (" + strings.Join(cols, ",") + ") VALUES (" + strings.Join(ph, ",") + ")"
+	_, err := s.exec(q, vals)
 	return err
 }
 
-func (s *session) alterRole(fields []string) error {
+func (s *session) alterRole(sql string, fields []string) error {
 	if len(fields) < 3 {
 		return fmt.Errorf("syntax error in ALTER ROLE")
 	}
@@ -79,19 +88,45 @@ func (s *session) alterRole(fields []string) error {
 		return err
 	}
 
-	attrs := parseRoleAttrs(fields[3:])
-	if len(attrs) == 0 {
-		return nil // ALTER ROLE ... SET config / other — accept as no-op
+	set := make([]string, 0, 2)
+	vals := make([]core.Value, 0, 3)
+	if pw, ok := extractPassword(sql); ok {
+		verifier, err := buildSCRAMVerifier(pw)
+		if err != nil {
+			return err
+		}
+		set = append(set, "rolpassword = ?")
+		vals = append(vals, verifier)
 	}
-	set := make([]string, 0, len(attrs))
-	vals := make([]core.Value, 0, len(attrs)+1)
-	for col, v := range attrs {
+	for col, v := range parseRoleAttrs(fields[3:]) {
 		set = append(set, col+" = ?")
 		vals = append(vals, v)
+	}
+	if len(set) == 0 {
+		return nil // ALTER ROLE ... SET config / other — accept as no-op
 	}
 	vals = append(vals, name)
 	_, err := s.exec("UPDATE _overlite_roles SET "+strings.Join(set, ", ")+" WHERE rolname = ?", vals)
 	return err
+}
+
+// extractPassword pulls the string after PASSWORD / ENCRYPTED PASSWORD out of a
+// CREATE/ALTER ROLE statement.
+func extractPassword(sql string) (string, bool) {
+	low := strings.ToLower(sql)
+	i := strings.Index(low, "password")
+	if i < 0 {
+		return "", false
+	}
+	p := i + len("password")
+	for p < len(sql) && (sql[p] == ' ' || sql[p] == '\t') {
+		p++
+	}
+	if p < len(sql) && sql[p] == '\'' {
+		end := endOfStringLiteral(sql, p)
+		return strings.ReplaceAll(sql[p+1:end-1], "''", "'"), true
+	}
+	return "", false
 }
 
 func (s *session) dropRole(fields []string) error {

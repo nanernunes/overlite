@@ -18,9 +18,85 @@ import (
 
 const scramIterations = 4096
 
-// authSCRAM runs the four-message SASL exchange, returning nil when the client
-// proves knowledge of the password.
-func (p *Protocol) authSCRAM(c *wireConn, user string) error {
+// scramVerifier holds the SCRAM keys derived from a password (the form Postgres
+// stores in rolpassword): enough to authenticate without the plaintext.
+type scramVerifier struct {
+	iter      int
+	salt      []byte
+	storedKey []byte
+	serverKey []byte
+}
+
+// buildSCRAMVerifier derives a fresh verifier for password and encodes it as
+// Postgres does: SCRAM-SHA-256$<iter>:<salt>$<StoredKey>:<ServerKey> (base64).
+func buildSCRAMVerifier(password string) (string, error) {
+	salt := make([]byte, 16)
+	if _, err := rand.Read(salt); err != nil {
+		return "", err
+	}
+	v := deriveVerifier(password, salt, scramIterations)
+	return fmt.Sprintf("SCRAM-SHA-256$%d:%s$%s:%s", v.iter,
+		base64.StdEncoding.EncodeToString(v.salt),
+		base64.StdEncoding.EncodeToString(v.storedKey),
+		base64.StdEncoding.EncodeToString(v.serverKey)), nil
+}
+
+// deriveVerifier computes the SCRAM keys for a password with a given salt/iter.
+func deriveVerifier(password string, salt []byte, iter int) *scramVerifier {
+	salted := pbkdf2SHA256([]byte(password), salt, iter, sha256.Size)
+	clientKey := hmacSHA256(salted, []byte("Client Key"))
+	storedKey := sha256.Sum256(clientKey)
+	return &scramVerifier{
+		iter:      iter,
+		salt:      salt,
+		storedKey: storedKey[:],
+		serverKey: hmacSHA256(salted, []byte("Server Key")),
+	}
+}
+
+// parseSCRAMVerifier decodes a stored "SCRAM-SHA-256$..." verifier string.
+func parseSCRAMVerifier(s string) (*scramVerifier, bool) {
+	const prefix = "SCRAM-SHA-256$"
+	if !strings.HasPrefix(s, prefix) {
+		return nil, false
+	}
+	saltPart, keyPart, ok := strings.Cut(s[len(prefix):], "$")
+	if !ok {
+		return nil, false
+	}
+	iterStr, saltB64, ok := strings.Cut(saltPart, ":")
+	if !ok {
+		return nil, false
+	}
+	storedB64, serverB64, ok := strings.Cut(keyPart, ":")
+	if !ok {
+		return nil, false
+	}
+	iter, err := strconv.Atoi(iterStr)
+	if err != nil {
+		return nil, false
+	}
+	salt, e1 := base64.StdEncoding.DecodeString(saltB64)
+	stored, e2 := base64.StdEncoding.DecodeString(storedB64)
+	server, e3 := base64.StdEncoding.DecodeString(serverB64)
+	if e1 != nil || e2 != nil || e3 != nil {
+		return nil, false
+	}
+	return &scramVerifier{iter: iter, salt: salt, storedKey: stored, serverKey: server}, true
+}
+
+// verifies reports whether password reproduces this verifier's StoredKey (used
+// for cleartext auth against a stored verifier).
+func (v *scramVerifier) verifies(password string) bool {
+	got := deriveVerifier(password, v.salt, v.iter)
+	return hmac.Equal(got.storedKey, v.storedKey)
+}
+
+// authSCRAM runs the four-message SASL exchange against cred, returning nil when
+// the client proves knowledge of the password. The salt/iteration/keys come from
+// a stored verifier when present, otherwise they are derived from the known
+// plaintext with a fresh salt.
+func (p *Protocol) authSCRAM(c *wireConn, user string, cred credential) error {
 	// AuthenticationSASL (10): advertise the one mechanism (list ends with an
 	// extra NUL).
 	mechs := appendCString(nil, "SCRAM-SHA-256")
@@ -54,18 +130,24 @@ func (p *Protocol) authSCRAM(c *wireConn, user string) error {
 		return fmt.Errorf("missing client nonce")
 	}
 
-	// AuthenticationSASLContinue (11): server-first-message.
-	salt := make([]byte, 16)
-	if _, err := rand.Read(salt); err != nil {
-		return err
+	// The verifier: use the role's stored keys, or derive from the plaintext.
+	v := cred.scram
+	if v == nil {
+		salt := make([]byte, 16)
+		if _, err := rand.Read(salt); err != nil {
+			return err
+		}
+		v = deriveVerifier(cred.plaintext, salt, scramIterations)
 	}
+
+	// AuthenticationSASLContinue (11): server-first-message.
 	serverNonce, err := randomNonce()
 	if err != nil {
 		return err
 	}
 	nonce := clientNonce + serverNonce
-	serverFirst := "r=" + nonce + ",s=" + base64.StdEncoding.EncodeToString(salt) +
-		",i=" + strconv.Itoa(scramIterations)
+	serverFirst := "r=" + nonce + ",s=" + base64.StdEncoding.EncodeToString(v.salt) +
+		",i=" + strconv.Itoa(v.iter)
 	if err := c.send(msgAuthentication, append(i32(11), []byte(serverFirst)...)); err != nil {
 		return err
 	}
@@ -91,12 +173,9 @@ func (p *Protocol) authSCRAM(c *wireConn, user string) error {
 		return fmt.Errorf("bad client proof")
 	}
 
-	// Derive the SCRAM keys and verify the proof.
-	salted := pbkdf2SHA256([]byte(p.password), salt, scramIterations, sha256.Size)
-	clientKey := hmacSHA256(salted, []byte("Client Key"))
-	storedKey := sha256.Sum256(clientKey)
+	// Verify the client proof against the StoredKey.
 	authMessage := clientFirstBare + "," + serverFirst + "," + scramWithoutProof(clientFinal)
-	clientSig := hmacSHA256(storedKey[:], []byte(authMessage))
+	clientSig := hmacSHA256(v.storedKey, []byte(authMessage))
 	if len(proof) != len(clientSig) {
 		return p.authFailed(c)
 	}
@@ -106,13 +185,12 @@ func (p *Protocol) authSCRAM(c *wireConn, user string) error {
 		recovered[i] = proof[i] ^ clientSig[i]
 	}
 	got := sha256.Sum256(recovered)
-	if !hmac.Equal(got[:], storedKey[:]) {
+	if !hmac.Equal(got[:], v.storedKey) {
 		return p.authFailed(c)
 	}
 
 	// AuthenticationSASLFinal (12): send the server signature.
-	serverKey := hmacSHA256(salted, []byte("Server Key"))
-	serverSig := hmacSHA256(serverKey, []byte(authMessage))
+	serverSig := hmacSHA256(v.serverKey, []byte(authMessage))
 	final := "v=" + base64.StdEncoding.EncodeToString(serverSig)
 	if err := c.send(msgAuthentication, append(i32(12), []byte(final)...)); err != nil {
 		return err

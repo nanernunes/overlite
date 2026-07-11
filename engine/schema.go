@@ -163,6 +163,7 @@ func setupConnection(ctx context.Context, exec func(string) error, query func(st
 	if err := exec(rolesTableDDL); err != nil {
 		return err
 	}
+	_ = exec(rolesAddPasswordDDL) // migrate older tables; errors if already present
 	if err := exec(seedDefaultRoleSQL()); err != nil {
 		return err
 	}

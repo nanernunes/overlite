@@ -85,8 +85,10 @@ hba:
 ```
 
 Methods `trust`, `reject`, `scram-sha-256`, `md5`, and `password` are enforced;
-`peer`/`cert` are accepted without their verification. The password checked is
-still the single `POSTGRES_PASSWORD` (per-role passwords aren't stored yet).
+`peer`/`cert` are accepted without their verification. Each role authenticates
+against **its own password** — `CREATE ROLE alice LOGIN PASSWORD 'x'` stores a
+SCRAM verifier (never plaintext), and roles without one fall back to
+`POSTGRES_PASSWORD`.
 
 ## Schemas map to files
 
@@ -124,7 +126,7 @@ for a real production system**. ✅ done · 🟡 partial · ⬜ not yet.
 | Numeric precision | 🟡 | SQLite affinity; not exact fixed-point (money) |
 | Timestamps with time zone | 🟡 | stored as text; no real `timestamptz` / tz math |
 | Backup / restore | ✅ | `\copy` and `pg_dump` (schema + data: types, constraints, sequences) |
-| Roles & permissions | 🟡 | `CREATE`/`ALTER`/`DROP ROLE`/`USER` in `\du`; `GRANT`/`REVOKE` accepted as no-ops; no enforcement or row-level security |
+| Roles & permissions | 🟡 | `CREATE`/`ALTER`/`DROP ROLE`/`USER` in `\du` with enforced per-role passwords; `GRANT`/`REVOKE` accepted as no-ops; no privileges or row-level security |
 | Server-side logic | ⬜ | PL/pgSQL functions & procedures (triggers only in SQLite syntax) |
 | Sequences | ✅ | `CREATE`/`ALTER`/`DROP SEQUENCE`, `nextval`/`currval`/`setval`/`lastval`, `\ds`; `DEFAULT nextval()` in DDL not supported (use `SERIAL`) |
 | Enum types | 🟡 | `CREATE`/`ALTER`/`DROP TYPE … AS ENUM`, `\dT`; enum columns become `TEXT` + a `CHECK`; no enum ordering semantics |
@@ -191,11 +193,9 @@ These run so migrations, ORMs, and dumps proceed, but have no real effect:
 
 ### Partial (works, with caveats)
 
-- **`pg_hba`** — rules (conf **or** YAML) select the auth method and reject
-  per connection, but the password verified is the single `POSTGRES_PASSWORD`
-  (no per-role passwords yet).
-- **Roles** — `CREATE`/`ALTER`/`DROP ROLE`/`USER` show up in `\du`, but
-  attributes aren't enforced.
+- **Roles** — `CREATE`/`ALTER`/`DROP ROLE`/`USER` show up in `\du` and enforce a
+  per-role `PASSWORD` (stored as a SCRAM verifier), but other attributes
+  (`SUPERUSER`, `CREATEDB`, …) aren't enforced.
 - **Enum columns** — enforced via `TEXT` + `CHECK` and `\dT+` lists the
   elements, but there's no enum ordering/comparison.
 - **Composite types** — `CREATE TYPE … AS (…)` shows in `pg_type`/`\dT`, but the

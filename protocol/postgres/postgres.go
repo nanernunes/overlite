@@ -86,7 +86,18 @@ func (p *Protocol) Serve(ctx context.Context, conn net.Conn, engine core.Engine)
 		cancelBackend(cancelReq.pid, cancelReq.secret)
 		return nil
 	}
-	if err := p.authenticate(c, params["user"], params["database"], clientIP(conn), c.secured); err != nil {
+
+	// A dedicated engine connection per client, opened before auth so we can look
+	// up the connecting role's password.
+	db, err := engine.Session(ctx)
+	if err != nil {
+		_ = c.sendFatal("53300", "too many connections: "+err.Error())
+		_ = c.flush()
+		return err
+	}
+	defer db.Close()
+
+	if err := p.authenticate(c, params["user"], params["database"], clientIP(conn), c.secured, db); err != nil {
 		return err
 	}
 
@@ -99,15 +110,6 @@ func (p *Protocol) Serve(ctx context.Context, conn net.Conn, engine core.Engine)
 	if err := p.completeHandshake(c, pid, secret); err != nil {
 		return err
 	}
-
-	// A dedicated engine connection per client, so clients run concurrently.
-	db, err := engine.Session(ctx)
-	if err != nil {
-		_ = c.sendFatal("53300", "too many connections: "+err.Error())
-		_ = c.flush()
-		return err
-	}
-	defer db.Close()
 
 	s := newSession(ctx, c, db)
 	s.canceler = cl
@@ -133,24 +135,70 @@ func (p *Protocol) authMethod() string {
 	}
 }
 
+// credential is what a password method authenticates against: a stored SCRAM
+// verifier (per-role) or a known plaintext (the global POSTGRES_PASSWORD).
+type credential struct {
+	plaintext string
+	scram     *scramVerifier
+}
+
+// matches reports whether password satisfies the credential (cleartext path).
+func (cred credential) matches(password string) bool {
+	if cred.scram != nil {
+		return cred.scram.verifies(password)
+	}
+	return password == cred.plaintext
+}
+
 // authenticate runs the auth method resolved for this connection against the
 // client (the pg_hba policy decides when configured, else the global method).
-func (p *Protocol) authenticate(c *wireConn, user, db string, ip net.IP, ssl bool) error {
-	switch p.resolveMethod(user, db, ip, ssl) {
-	case "reject":
+func (p *Protocol) authenticate(c *wireConn, user, database string, ip net.IP, ssl bool, sess core.Session) error {
+	method := p.resolveMethod(user, database, ip, ssl)
+	if method == "reject" {
 		_ = c.sendFatal("28000",
-			fmt.Sprintf("no pg_hba.conf entry for user %q, database %q", user, db))
+			fmt.Sprintf("no pg_hba.conf entry for user %q, database %q", user, database))
 		_ = c.flush()
-		return fmt.Errorf("connection rejected by pg_hba: user=%s db=%s", user, db)
-	case "trust":
-		return nil
-	case "password":
-		return p.authCleartext(c)
-	case "md5":
-		return p.authMD5(c, user)
-	default:
-		return p.authSCRAM(c, user)
+		return fmt.Errorf("connection rejected by pg_hba: user=%s db=%s", user, database)
 	}
+	if method == "trust" {
+		return nil
+	}
+	cred, ok := p.credentialFor(sess, user)
+	if !ok {
+		return p.authFailed(c) // password method but no credential configured
+	}
+	switch method {
+	case "password":
+		return p.authCleartext(c, cred)
+	case "md5":
+		return p.authMD5(c, user, cred)
+	default:
+		return p.authSCRAM(c, user, cred)
+	}
+}
+
+// credentialFor resolves the connecting role's credential: its stored SCRAM
+// verifier if it has one, otherwise the global POSTGRES_PASSWORD.
+func (p *Protocol) credentialFor(sess core.Session, user string) (credential, bool) {
+	if v := lookupRoleVerifier(sess, user); v != nil {
+		return credential{scram: v}, true
+	}
+	if p.password != "" {
+		return credential{plaintext: p.password}, true
+	}
+	return credential{}, false
+}
+
+// lookupRoleVerifier reads a role's stored SCRAM verifier from _overlite_roles.
+func lookupRoleVerifier(sess core.Session, user string) *scramVerifier {
+	rs, err := sess.Execute(context.Background(),
+		"SELECT rolpassword FROM _overlite_roles WHERE rolname = ? COLLATE NOCASE AND rolpassword IS NOT NULL",
+		[]core.Value{user})
+	if err != nil || len(rs.Rows) == 0 || rs.Rows[0][0] == nil {
+		return nil
+	}
+	v, _ := parseSCRAMVerifier(fmt.Sprint(rs.Rows[0][0]))
+	return v
 }
 
 // resolveMethod returns the effective auth method for a connection: from the
@@ -199,8 +247,8 @@ func (p *Protocol) authFailed(c *wireConn) error {
 	return fmt.Errorf("password authentication failed")
 }
 
-// authCleartext performs AuthenticationCleartextPassword (code 3).
-func (p *Protocol) authCleartext(c *wireConn) error {
+// authCleartext performs AuthenticationCleartextPassword (code 3) against cred.
+func (p *Protocol) authCleartext(c *wireConn, cred credential) error {
 	if err := c.send(msgAuthentication, i32(3)); err != nil {
 		return err
 	}
@@ -214,15 +262,17 @@ func (p *Protocol) authCleartext(c *wireConn) error {
 	if typ != msgPasswordMessage {
 		return fmt.Errorf("expected password message, got %q", string(typ))
 	}
-	if strings.TrimRight(string(body), "\x00") != p.password {
+	if !cred.matches(strings.TrimRight(string(body), "\x00")) {
 		return p.authFailed(c)
 	}
 	return nil
 }
 
 // authMD5 performs AuthenticationMD5Password (code 5): the client returns
-// "md5" + md5(md5(password+user) + salt), which we recompute and compare.
-func (p *Protocol) authMD5(c *wireConn, user string) error {
+// "md5" + md5(md5(password+user) + salt), which we recompute and compare. It
+// needs the plaintext, so a role stored only as a SCRAM verifier can't use md5
+// (Postgres behaves the same).
+func (p *Protocol) authMD5(c *wireConn, user string, cred credential) error {
 	salt := make([]byte, 4)
 	if _, err := rand.Read(salt); err != nil {
 		return err
@@ -240,7 +290,8 @@ func (p *Protocol) authMD5(c *wireConn, user string) error {
 	if typ != msgPasswordMessage {
 		return fmt.Errorf("expected password message, got %q", string(typ))
 	}
-	if strings.TrimRight(string(body), "\x00") != md5Password(p.password, user, salt) {
+	if cred.plaintext == "" ||
+		strings.TrimRight(string(body), "\x00") != md5Password(cred.plaintext, user, salt) {
 		return p.authFailed(c)
 	}
 	return nil

@@ -14,8 +14,13 @@ const rolesTableDDL = `CREATE TABLE IF NOT EXISTS _overlite_roles (
   rolcreatedb   INTEGER DEFAULT 0,
   rolcanlogin   INTEGER DEFAULT 0,
   rolreplication INTEGER DEFAULT 0,
-  rolbypassrls  INTEGER DEFAULT 0
+  rolbypassrls  INTEGER DEFAULT 0,
+  rolpassword   TEXT
 )`
+
+// rolesAddPasswordDDL adds rolpassword to tables created before per-role
+// passwords existed; it errors (harmlessly, ignored) when the column is present.
+const rolesAddPasswordDDL = `ALTER TABLE _overlite_roles ADD COLUMN rolpassword TEXT`
 
 // seedDefaultRoleSQL inserts the configured default role (a superuser that can
 // log in) if it isn't already present.
