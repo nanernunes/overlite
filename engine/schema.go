@@ -190,6 +190,9 @@ func setupConnection(ctx context.Context, exec func(string) error, query func(st
 	if err := exec(ownersTableDDL); err != nil {
 		return err
 	}
+	if err := exec(membershipsTableDDL); err != nil {
+		return err
+	}
 	// Expose each sequence as a one-row relation (last_value/is_called), as
 	// Postgres does, so pg_dump can read its current value with
 	// "SELECT last_value, is_called FROM <seq>".

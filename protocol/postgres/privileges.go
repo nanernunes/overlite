@@ -69,24 +69,62 @@ func (s *session) computeBypass() bool {
 
 func (s *session) clearPrivCache() { s.bypassCache = nil }
 
-// hasPrivilege checks ownership then (for grantable privileges) the grant table.
+// hasPrivilege checks ownership then (for grantable privileges) the grant table,
+// evaluated against the role's effective set (itself plus inherited roles).
 func (s *session) hasPrivilege(table, priv string) bool {
-	if s.ownsTable(table) {
+	roles := s.effectiveRoles()
+	if s.ownsTable(table, roles) {
 		return true
 	}
 	if priv == "OWNER" {
-		return false // only the owner (or a superuser, already bypassed) qualifies
+		return false // only the owner (or a role that inherits it) qualifies
 	}
+	grantees := inList(append(append([]string{}, roles...), "public"))
 	rs, err := s.exec("SELECT 1 FROM _overlite_grants WHERE lower(tablename) = lower("+
 		sqlStr(table)+") AND upper(privilege) IN (upper("+sqlStr(priv)+"), 'ALL')"+
-		" AND lower(grantee) IN (lower("+sqlStr(s.currentRole)+"), 'public') LIMIT 1", nil)
+		" AND lower(grantee) IN ("+grantees+") LIMIT 1", nil)
 	return err == nil && len(rs.Rows) > 0
 }
 
-func (s *session) ownsTable(table string) bool {
+func (s *session) ownsTable(table string, roles []string) bool {
 	rs, err := s.exec("SELECT 1 FROM _overlite_owners WHERE lower(tablename) = lower("+
-		sqlStr(table)+") AND lower(owner) = lower("+sqlStr(s.currentRole)+") LIMIT 1", nil)
+		sqlStr(table)+") AND lower(owner) IN ("+inList(roles)+") LIMIT 1", nil)
 	return err == nil && len(rs.Rows) > 0
+}
+
+// effectiveRoles returns the current role plus every role it inherits from,
+// transitively — following a membership edge only when the member has INHERIT.
+// All names are lower-cased.
+func (s *session) effectiveRoles() []string {
+	cur := strings.ToLower(s.currentRole)
+	roles := []string{cur}
+	rs, err := s.exec(`WITH RECURSIVE eff(role) AS (
+  SELECT lower(`+sqlStr(s.currentRole)+`)
+  UNION
+  SELECT lower(m.roleof) FROM _overlite_memberships m
+    JOIN eff e ON lower(m.member) = e.role
+    JOIN _overlite_roles r ON lower(r.rolname) = e.role AND r.rolinherit <> 0
+) SELECT role FROM eff`, nil)
+	if err != nil {
+		return roles
+	}
+	seen := map[string]bool{cur: true}
+	for _, row := range rs.Rows {
+		if str, ok := row[0].(string); ok && !seen[str] {
+			seen[str] = true
+			roles = append(roles, str)
+		}
+	}
+	return roles
+}
+
+// inList renders role names as a lower-cased SQL IN-list body.
+func inList(roles []string) string {
+	parts := make([]string, len(roles))
+	for i, r := range roles {
+		parts[i] = sqlStr(strings.ToLower(r))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // requiredPrivileges returns the (table, privilege) pairs a statement needs.

@@ -142,6 +142,11 @@ func (s *session) dropRole(fields []string) error {
 		if _, err := s.exec("DELETE FROM _overlite_roles WHERE rolname = ?", []core.Value{name}); err != nil {
 			return err
 		}
+		// Drop any membership edges touching the removed role.
+		if _, err := s.exec("DELETE FROM _overlite_memberships WHERE member = ? OR roleof = ?",
+			[]core.Value{name, name}); err != nil {
+			return err
+		}
 	}
 	return nil
 }

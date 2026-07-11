@@ -22,3 +22,10 @@ const ownersTableDDL = `CREATE TABLE IF NOT EXISTS _overlite_owners (
   tablename TEXT PRIMARY KEY COLLATE NOCASE,
   owner     TEXT COLLATE NOCASE
 )`
+
+// membershipsTableDDL records role membership (GRANT role TO role): member is a
+// member of roleof, and inherits its privileges when member has INHERIT.
+const membershipsTableDDL = `CREATE TABLE IF NOT EXISTS _overlite_memberships (
+  member TEXT COLLATE NOCASE,
+  roleof TEXT COLLATE NOCASE
+)`

@@ -1,6 +1,9 @@
 package postgres
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // GRANT/REVOKE handling and table-ownership tracking. These write the internal
 // _overlite_grants / _overlite_owners tables that privileges.go reads.
@@ -19,6 +22,11 @@ func (s *session) applyGrant(sql string) (string, error) {
 	tag := "GRANT"
 	if revoke {
 		tag = "REVOKE"
+	}
+
+	// No ON clause => role membership: GRANT <role> TO <member>.
+	if indexWord(strings.ToLower(sql), "on") < 0 {
+		return tag, s.applyRoleGrant(sql, revoke)
 	}
 
 	privs, tables, grantees, ok := parseGrant(sql, revoke)
@@ -52,6 +60,70 @@ func (s *session) applyGrant(sql string) (string, error) {
 		}
 	}
 	return tag, nil
+}
+
+// applyRoleGrant records or removes role membership for GRANT <role> TO <member>
+// / REVOKE <role> FROM <member>.
+func (s *session) applyRoleGrant(sql string, revoke bool) error {
+	roles, members, ok := parseRoleGrant(sql, revoke)
+	if !ok {
+		return nil
+	}
+	for _, role := range roles {
+		for _, mem := range members {
+			if revoke {
+				if _, err := s.exec("DELETE FROM _overlite_memberships WHERE lower(member)=lower("+
+					sqlStr(mem)+") AND lower(roleof)=lower("+sqlStr(role)+")", nil); err != nil {
+					return err
+				}
+				continue
+			}
+			if !s.roleExists(role) {
+				return fmt.Errorf("role %q does not exist", role)
+			}
+			if !s.roleExists(mem) {
+				return fmt.Errorf("role %q does not exist", mem)
+			}
+			// Idempotent: don't stack duplicate membership rows.
+			if _, err := s.exec("DELETE FROM _overlite_memberships WHERE lower(member)=lower("+
+				sqlStr(mem)+") AND lower(roleof)=lower("+sqlStr(role)+")", nil); err != nil {
+				return err
+			}
+			if _, err := s.exec("INSERT INTO _overlite_memberships (member, roleof) VALUES ("+
+				sqlStr(mem)+", "+sqlStr(role)+")", nil); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// parseRoleGrant splits "GRANT r1, r2 TO m1, m2 [WITH ADMIN OPTION]" (or the
+// REVOKE ... FROM form) into the granted roles and the members.
+func parseRoleGrant(sql string, revoke bool) (roles, members []string, ok bool) {
+	sep := "to"
+	if revoke {
+		sep = "from"
+	}
+	low := strings.ToLower(sql)
+	sepIdx := indexWord(low, sep)
+	if sepIdx < 0 {
+		return nil, nil, false
+	}
+	rolesSpec := sql[firstWordEnd(sql):sepIdx]
+	memSpec := sql[sepIdx+len(sep):]
+	for _, tail := range []string{" with admin option", " with admin", " granted by", " cascade", " restrict"} {
+		if k := strings.Index(strings.ToLower(memSpec), tail); k >= 0 {
+			memSpec = memSpec[:k]
+		}
+	}
+	memSpec = strings.TrimRight(memSpec, "; \t\n")
+	roles = splitGrantees(rolesSpec)
+	members = splitGrantees(memSpec)
+	if len(roles) == 0 || len(members) == 0 {
+		return nil, nil, false
+	}
+	return roles, members, true
 }
 
 // parseGrant extracts the privileges, tables, and grantees from a table
