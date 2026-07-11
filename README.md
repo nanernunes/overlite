@@ -126,7 +126,7 @@ for a real production system**. ✅ done · 🟡 partial · ⬜ not yet.
 | Numeric precision | 🟡 | SQLite affinity; not exact fixed-point (money) |
 | Timestamps with time zone | 🟡 | stored as text; no real `timestamptz` / tz math |
 | Backup / restore | ✅ | `\copy` and `pg_dump` (schema + data: types, constraints, sequences) |
-| Roles & permissions | 🟡 | `CREATE`/`ALTER`/`DROP ROLE`/`USER` in `\du`, enforced per-role passwords, table ownership, enforced `GRANT`/`REVOKE` of table privileges, and role membership (`GRANT role TO role`) with `INHERIT`; no column/row-level security |
+| Roles & permissions | 🟡 | `\du` roles with enforced passwords, table ownership, `GRANT`/`REVOKE` of table privileges, role membership with `INHERIT`, and `CREATEROLE`/`ADMIN OPTION` policing; no column/row-level security |
 | Server-side logic | ⬜ | PL/pgSQL functions & procedures (triggers only in SQLite syntax) |
 | Sequences | ✅ | `CREATE`/`ALTER`/`DROP SEQUENCE`, `nextval`/`currval`/`setval`/`lastval`, `\ds`; `DEFAULT nextval()` in DDL not supported (use `SERIAL`) |
 | Enum types | 🟡 | `CREATE`/`ALTER`/`DROP TYPE … AS ENUM`, `\dT`; enum columns become `TEXT` + a `CHECK`; no enum ordering semantics |
@@ -200,11 +200,14 @@ These run so migrations, ORMs, and dumps proceed, but have no real effect:
   (`GRANT role TO role`) is enforced too: a member inherits the role's
   privileges transitively when it has `INHERIT`, else through `SET ROLE` —
   which is itself allowed only to a role the session user is a member of
-  (superusers unrestricted; `SET SESSION AUTHORIZATION` is superuser-only). Not
+  (superusers unrestricted; `SET SESSION AUTHORIZATION` is superuser-only).
+  `CREATE`/`ALTER`/`DROP ROLE` require `CREATEROLE`, and membership can be
+  granted on only by a superuser or a holder of `ADMIN OPTION` (which the
+  creator gets automatically, and `WITH ADMIN OPTION` delegates). Not
   modeled: column- and row-level security, `GRANT` on
   schemas/sequences/functions, and the other role attributes (`SUPERUSER`,
-  `CREATEDB`, …) beyond `INHERIT`. Superusers and roles that were never
-  `CREATE ROLE`'d bypass the checks, so existing single-user setups are
+  `CREATEDB`, …) beyond `INHERIT`/`CREATEROLE`. Superusers and roles that were
+  never `CREATE ROLE`'d bypass the checks, so existing single-user setups are
   unaffected.
 - **Enum columns** — enforced via `TEXT` + `CHECK` and `\dT+` lists the
   elements, but there's no enum ordering/comparison.

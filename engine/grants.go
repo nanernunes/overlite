@@ -25,7 +25,13 @@ const ownersTableDDL = `CREATE TABLE IF NOT EXISTS _overlite_owners (
 
 // membershipsTableDDL records role membership (GRANT role TO role): member is a
 // member of roleof, and inherits its privileges when member has INHERIT.
+// admin_option marks WITH ADMIN OPTION — the right to grant that role on.
 const membershipsTableDDL = `CREATE TABLE IF NOT EXISTS _overlite_memberships (
-  member TEXT COLLATE NOCASE,
-  roleof TEXT COLLATE NOCASE
+  member       TEXT COLLATE NOCASE,
+  roleof       TEXT COLLATE NOCASE,
+  admin_option INTEGER DEFAULT 0
 )`
+
+// membershipsAddAdminDDL adds admin_option to membership tables created before
+// WITH ADMIN OPTION existed; it errors (harmlessly, ignored) when present.
+const membershipsAddAdminDDL = `ALTER TABLE _overlite_memberships ADD COLUMN admin_option INTEGER DEFAULT 0`

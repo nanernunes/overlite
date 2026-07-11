@@ -25,7 +25,15 @@ func (s *session) tryRoleDDL(sql string) (tag string, handled bool, err error) {
 		if !isRole {
 			return "", false, nil
 		}
-		return "CREATE ROLE", true, s.createRole(sql, fields, obj)
+		name := roleDDLTarget(fields)
+		if err := s.requireRoleAdmin("CREATE", name); err != nil {
+			return "CREATE ROLE", true, err
+		}
+		err := s.createRole(sql, fields, obj)
+		if err == nil {
+			s.grantCreatorAdmin(name)
+		}
+		return "CREATE ROLE", true, err
 	case "ALTER":
 		if obj == "DEFAULT" { // ALTER DEFAULT PRIVILEGES — accept, no-op
 			return "ALTER DEFAULT PRIVILEGES", true, nil
@@ -33,14 +41,58 @@ func (s *session) tryRoleDDL(sql string) (tag string, handled bool, err error) {
 		if !isRole {
 			return "", false, nil
 		}
+		if err := s.requireRoleAdmin("ALTER", roleDDLTarget(fields)); err != nil {
+			return "ALTER ROLE", true, err
+		}
 		return "ALTER ROLE", true, s.alterRole(sql, fields)
 	case "DROP":
 		if !isRole {
 			return "", false, nil
 		}
+		if err := s.requireRoleAdmin("DROP", roleDDLTarget(fields)); err != nil {
+			return "DROP ROLE", true, err
+		}
 		return "DROP ROLE", true, s.dropRole(fields)
 	}
 	return "", false, nil
+}
+
+// roleDDLTarget returns the (unquoted) role name a CREATE/ALTER/DROP ROLE acts
+// on — the token after the object keyword, skipping "IF (NOT) EXISTS".
+func roleDDLTarget(fields []string) string {
+	rest := fields[2:]
+	for len(rest) > 0 {
+		switch strings.ToLower(strings.TrimRight(rest[0], ";")) {
+		case "if", "not", "exists":
+			rest = rest[1:]
+		default:
+			return unquoteIdent(rest[0])
+		}
+	}
+	return ""
+}
+
+// requireRoleAdmin enforces who may manage roles: a superuser or unmanaged role
+// (bypass) or a role with CREATEROLE. A role may always ALTER itself (e.g. to
+// change its own password).
+func (s *session) requireRoleAdmin(verb, target string) error {
+	if s.roleBypasses(s.currentRole) || s.hasCreateRole(s.currentRole) {
+		return nil
+	}
+	if verb == "ALTER" && target != "" && strings.EqualFold(target, s.currentRole) {
+		return nil
+	}
+	return fmt.Errorf("permission denied to %s role", strings.ToLower(verb))
+}
+
+// grantCreatorAdmin gives a non-bypass creator ADMIN OPTION (an inheriting
+// membership) on the role it just created, so it can administer and grant it.
+func (s *session) grantCreatorAdmin(name string) {
+	if name == "" || s.roleBypasses(s.currentRole) {
+		return
+	}
+	_, _ = s.exec("INSERT INTO _overlite_memberships (member, roleof, admin_option) VALUES ("+
+		sqlStr(s.currentRole)+", "+sqlStr(name)+", 1)", nil)
 }
 
 func (s *session) createRole(sql string, fields []string, obj string) error {

@@ -73,6 +73,22 @@ func (s *session) roleBypasses(role string) bool {
 
 func (s *session) clearPrivCache() { s.bypassCache = nil }
 
+// hasCreateRole reports whether the role has the CREATEROLE attribute.
+func (s *session) hasCreateRole(role string) bool {
+	rs, err := s.exec("SELECT 1 FROM _overlite_roles WHERE lower(rolname) = lower("+
+		sqlStr(role)+") AND rolcreaterole <> 0 LIMIT 1", nil)
+	return err == nil && len(rs.Rows) > 0
+}
+
+// hasAdminOption reports whether the current role (directly or via an inherited
+// role) holds ADMIN OPTION on target, i.e. may grant/revoke membership in it.
+func (s *session) hasAdminOption(target string) bool {
+	roles := s.effectiveRoles()
+	rs, err := s.exec("SELECT 1 FROM _overlite_memberships WHERE lower(roleof) = lower("+
+		sqlStr(target)+") AND admin_option <> 0 AND lower(member) IN ("+inList(roles)+") LIMIT 1", nil)
+	return err == nil && len(rs.Rows) > 0
+}
+
 // hasPrivilege checks ownership then (for grantable privileges) the grant table,
 // evaluated against the role's effective set (itself plus inherited roles).
 func (s *session) hasPrivilege(table, priv string) bool {

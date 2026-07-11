@@ -63,15 +63,27 @@ func (s *session) applyGrant(sql string) (string, error) {
 }
 
 // applyRoleGrant records or removes role membership for GRANT <role> TO <member>
-// / REVOKE <role> FROM <member>.
+// / REVOKE [ADMIN OPTION FOR] <role> FROM <member>. Only a superuser or a holder
+// of ADMIN OPTION on the role may administer its membership.
 func (s *session) applyRoleGrant(sql string, revoke bool) error {
-	roles, members, ok := parseRoleGrant(sql, revoke)
+	rg, ok := parseRoleGrant(sql, revoke)
 	if !ok {
 		return nil
 	}
-	for _, role := range roles {
-		for _, mem := range members {
+	for _, role := range rg.roles {
+		if !s.canGrantMembership(role) {
+			return fmt.Errorf("must have admin option on role %q", role)
+		}
+		for _, mem := range rg.members {
 			if revoke {
+				if rg.adminOnly {
+					// REVOKE ADMIN OPTION FOR: keep membership, drop the option.
+					if _, err := s.exec("UPDATE _overlite_memberships SET admin_option=0 WHERE lower(member)=lower("+
+						sqlStr(mem)+") AND lower(roleof)=lower("+sqlStr(role)+")", nil); err != nil {
+						return err
+					}
+					continue
+				}
 				if _, err := s.exec("DELETE FROM _overlite_memberships WHERE lower(member)=lower("+
 					sqlStr(mem)+") AND lower(roleof)=lower("+sqlStr(role)+")", nil); err != nil {
 					return err
@@ -84,13 +96,17 @@ func (s *session) applyRoleGrant(sql string, revoke bool) error {
 			if !s.roleExists(mem) {
 				return fmt.Errorf("role %q does not exist", mem)
 			}
+			admin := "0"
+			if rg.admin {
+				admin = "1"
+			}
 			// Idempotent: don't stack duplicate membership rows.
 			if _, err := s.exec("DELETE FROM _overlite_memberships WHERE lower(member)=lower("+
 				sqlStr(mem)+") AND lower(roleof)=lower("+sqlStr(role)+")", nil); err != nil {
 				return err
 			}
-			if _, err := s.exec("INSERT INTO _overlite_memberships (member, roleof) VALUES ("+
-				sqlStr(mem)+", "+sqlStr(role)+")", nil); err != nil {
+			if _, err := s.exec("INSERT INTO _overlite_memberships (member, roleof, admin_option) VALUES ("+
+				sqlStr(mem)+", "+sqlStr(role)+", "+admin+")", nil); err != nil {
 				return err
 			}
 		}
@@ -98,9 +114,23 @@ func (s *session) applyRoleGrant(sql string, revoke bool) error {
 	return nil
 }
 
-// parseRoleGrant splits "GRANT r1, r2 TO m1, m2 [WITH ADMIN OPTION]" (or the
-// REVOKE ... FROM form) into the granted roles and the members.
-func parseRoleGrant(sql string, revoke bool) (roles, members []string, ok bool) {
+// canGrantMembership reports whether the current role may grant/revoke
+// membership in role: a superuser/unmanaged role, or a holder of ADMIN OPTION.
+func (s *session) canGrantMembership(role string) bool {
+	return s.roleBypasses(s.currentRole) || s.hasAdminOption(role)
+}
+
+// roleGrant is the parsed form of a role-membership GRANT/REVOKE.
+type roleGrant struct {
+	roles     []string
+	members   []string
+	admin     bool // GRANT ... WITH ADMIN OPTION
+	adminOnly bool // REVOKE ADMIN OPTION FOR ...
+}
+
+// parseRoleGrant splits "GRANT r1, r2 TO m1, m2 [WITH ADMIN OPTION]" or
+// "REVOKE [ADMIN OPTION FOR] r1 FROM m1" into its parts.
+func parseRoleGrant(sql string, revoke bool) (roleGrant, bool) {
 	sep := "to"
 	if revoke {
 		sep = "from"
@@ -108,22 +138,36 @@ func parseRoleGrant(sql string, revoke bool) (roles, members []string, ok bool) 
 	low := strings.ToLower(sql)
 	sepIdx := indexWord(low, sep)
 	if sepIdx < 0 {
-		return nil, nil, false
+		return roleGrant{}, false
 	}
 	rolesSpec := sql[firstWordEnd(sql):sepIdx]
 	memSpec := sql[sepIdx+len(sep):]
-	for _, tail := range []string{" with admin option", " with admin", " granted by", " cascade", " restrict"} {
+
+	var rg roleGrant
+	// GRANT ... WITH ADMIN OPTION
+	if k := strings.Index(strings.ToLower(memSpec), "with admin"); k >= 0 {
+		rg.admin = true
+		memSpec = memSpec[:k]
+	}
+	// REVOKE ADMIN OPTION FOR <role> FROM ...
+	if rs := strings.TrimSpace(rolesSpec); len(rs) >= 15 && strings.EqualFold(rs[:15], "admin option fo") {
+		if i := strings.Index(strings.ToLower(rs), "for"); i >= 0 {
+			rg.adminOnly = true
+			rolesSpec = rs[i+len("for"):]
+		}
+	}
+	for _, tail := range []string{" granted by", " cascade", " restrict"} {
 		if k := strings.Index(strings.ToLower(memSpec), tail); k >= 0 {
 			memSpec = memSpec[:k]
 		}
 	}
 	memSpec = strings.TrimRight(memSpec, "; \t\n")
-	roles = splitGrantees(rolesSpec)
-	members = splitGrantees(memSpec)
-	if len(roles) == 0 || len(members) == 0 {
-		return nil, nil, false
+	rg.roles = splitGrantees(rolesSpec)
+	rg.members = splitGrantees(memSpec)
+	if len(rg.roles) == 0 || len(rg.members) == 0 {
+		return roleGrant{}, false
 	}
-	return roles, members, true
+	return rg, true
 }
 
 // parseGrant extracts the privileges, tables, and grantees from a table
