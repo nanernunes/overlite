@@ -113,6 +113,10 @@ func oidForColumn(col core.Column, rows [][]core.Value, idx int) uint32 {
 	if boolCatalogColumns[col.Name] {
 		return oidBool
 	}
+	// Array columns carry their element type in the declared type (`text[]`).
+	if isArrayDecl(col.DeclType) {
+		return arrayOIDForDecl(col.DeclType)
+	}
 	// A faithfully-mappable declared type wins over value sampling (which would
 	// e.g. see a boolean's 0/1 as int, or a json string as text).
 	if oid, ok := strictDeclOID(col.DeclType); ok {
@@ -201,6 +205,10 @@ func boolish(v core.Value) bool {
 func encodeText(oid uint32, v core.Value) []byte {
 	if v == nil {
 		return nil
+	}
+	// Array columns hold a JSON array in a TEXT cell; render Postgres' `{…}`.
+	if isArrayOID(oid) {
+		return jsonArrayToPGText(v)
 	}
 	// Boolean columns may arrive as 0/1 integers or a stored 't'/'true' string;
 	// normalize to the Postgres 't'/'f' text form.

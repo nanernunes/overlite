@@ -34,6 +34,9 @@ func rewrite(sql string) string {
 	sql = rewritePgOptionsToTable(sql)
 	sql = rewriteUnnest(sql)
 	sql = rewritePartitionSRF(sql)
+	sql = rewriteArrayLiteral(sql)  // ARRAY[…] -> json_array(…)
+	sql = rewriteArrayCast(sql)     // '{…}'::type[] -> JSON literal
+	sql = rewriteArrayCastDrop(sql) // expr::type[] -> expr (value already JSON); before casts
 	sql = rewriteCasts(sql)
 	sql = rewriteJSONContains(sql) // after casts, so "x::jsonb @> ..." operands are whole
 	sql = rewriteArraySubscript(sql)
@@ -750,7 +753,9 @@ func rewriteAnyOperator(sql string) string {
 // identifier (e.g. prattrs[s]). SQLite has no array subscripting; these appear
 // only in catalog queries that never evaluate here, so we collapse them to
 // NULL. Requiring no space before "[" avoids touching SQLite's [ident] quoting.
-var reArraySubscript = regexp.MustCompile(`[A-Za-z_]\w*\[[^\]]*\]`)
+// Non-empty brackets only: `x[1]` is a subscript, but `text[]` is an array-type
+// declaration and must be left alone.
+var reArraySubscript = regexp.MustCompile(`[A-Za-z_]\w*\[[^\]]+\]`)
 
 func rewriteArraySubscript(sql string) string {
 	return mapOutsideStrings(sql, func(code string) string {

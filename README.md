@@ -109,8 +109,8 @@ schemas: `public`, `sales`, `audit`.
 High level, at a glance — including what's still needed to be **Postgres-ready
 for a real production system**. ✅ done · 🟡 partial · ⬜ not yet.
 
-Across the full feature matrix — **150 items: ✅ 124 · 🟡 17 · ⬜ 9**
-(83% done, 94% at least partial):
+Across the full feature matrix — **150 items: ✅ 124 · 🟡 18 · ⬜ 8**
+(83% done, 95% at least partial):
 
 | Area | ✅ | 🟡 | ⬜ |
 |---|--:|--:|--:|
@@ -118,7 +118,7 @@ Across the full feature matrix — **150 items: ✅ 124 · 🟡 17 · ⬜ 9**
 | Authentication | 9 | 0 | 0 |
 | DML (queries) | 11 | 1 | 1 |
 | DDL (schema) | 24 | 6 | 3 |
-| Data types | 9 | 2 | 2 |
+| Data types | 9 | 3 | 1 |
 | Transactions | 7 | 1 | 1 |
 | Schemas (multi-file) | 6 | 1 | 0 |
 | Catalog / introspection | 20 | 2 | 1 |
@@ -166,8 +166,8 @@ faithfully or aren't modeled yet. The full, current breakdown:
 
 These would require emulating features SQLite fundamentally lacks:
 
-- **Arrays** (`int[]`, `text[]`), **`hstore`**, geometric / network / range types
-  — SQLite has no array/composite storage.
+- **`hstore`**, geometric / network / range types — not modeled yet (arrays now
+  round-trip via JSON — see Partial).
 - **Exact `numeric`/`decimal`** precision & scale, and **`money`** — SQLite uses
   type affinity, not fixed-point.
 - **`timestamptz`** / real time-zone math — timestamps are stored as text.
@@ -236,6 +236,11 @@ These run so migrations, ORMs, and dumps proceed, but have no real effect:
   `INHERIT`/`CREATEROLE`/`BYPASSRLS`. Superusers and roles that were never
   `CREATE ROLE`'d bypass the checks, so existing single-user setups are
   unaffected.
+- **Arrays** (`int[]`, `text[]`, …) — round-trip end to end: `ARRAY[…]` and
+  `'{…}'::type[]` on the way in, real Postgres `{…}` (with the array OID) on the
+  way out. Stored as a JSON array in a `TEXT` cell, so the file stays a valid,
+  plain-SQLite-readable database (it just sees JSON instead of a PG array). Not
+  yet: element ops — `arr[i]`, `array_length`, `= ANY(arr)`, `unnest`.
 - **Enum columns** — enforced via `TEXT` + `CHECK` and `\dT+` lists the
   elements, but there's no enum ordering/comparison.
 - **Composite types** — `CREATE TYPE … AS (…)` shows in `pg_type`/`\dT`, but the
