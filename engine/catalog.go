@@ -540,10 +540,23 @@ var staticCatalogViews = []string{
 	 SELECT 0 AS oid, '' AS extname, 10 AS extowner, 2200 AS extnamespace,
 	        0 AS extrelocatable, '' AS extversion, NULL AS extconfig, NULL AS extcondition
 	 WHERE 0`,
+	// pg_depend: real structural dependencies, assembled from the other catalog
+	// views so the oids line up by construction. Each index / constraint /
+	// trigger / policy auto-depends ('a') on the table it belongs to.
 	`CREATE TEMP VIEW IF NOT EXISTS pg_depend AS
-	 SELECT 0 AS classid, 0 AS objid, 0 AS objsubid, 0 AS refclassid, 0 AS refobjid,
-	        0 AS refobjsubid, 'n' AS deptype
-	 WHERE 0`,
+	 SELECT 1259 AS classid, i.indexrelid AS objid, 0 AS objsubid,
+	        1259 AS refclassid, i.indrelid AS refobjid, 0 AS refobjsubid, 'a' AS deptype
+	 FROM pg_index i
+	 UNION ALL SELECT 2606, c.oid, 0, 1259, c.conrelid, 0, 'a' FROM pg_constraint c
+	 UNION ALL SELECT 2620, t.oid, 0, 1259, t.tgrelid, 0, 'a' FROM pg_trigger t
+	 UNION ALL SELECT 3256, p.oid, 0, 1259, p.polrelid, 0, 'a' FROM pg_policy p`,
+	// pg_shdepend: shared dependency of each table on its owning role.
+	`CREATE TEMP VIEW IF NOT EXISTS pg_shdepend AS
+	 SELECT 0 AS dbid, 1259 AS classid, c.oid AS objid, 0 AS objsubid,
+	        1260 AS refclassid, r.oid AS refobjid, 'o' AS deptype
+	 FROM _overlite_owners o
+	 JOIN pg_class c ON lower(c.relname) = lower(o.tablename) AND c.relkind IN ('r','p')
+	 JOIN pg_roles r ON lower(r.rolname) = lower(o.owner)`,
 	`CREATE TEMP VIEW IF NOT EXISTS pg_default_acl AS
 	 SELECT 0 AS oid, 0 AS defaclrole, 2200 AS defaclnamespace, 'r' AS defaclobjtype, NULL AS defaclacl
 	 WHERE 0`,

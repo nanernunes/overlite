@@ -109,8 +109,8 @@ schemas: `public`, `sales`, `audit`.
 High level, at a glance — including what's still needed to be **Postgres-ready
 for a real production system**. ✅ done · 🟡 partial · ⬜ not yet.
 
-Across the full feature matrix — **148 items: ✅ 122 · 🟡 17 · ⬜ 9**
-(82% done, 94% at least partial):
+Across the full feature matrix — **150 items: ✅ 124 · 🟡 17 · ⬜ 9**
+(83% done, 94% at least partial):
 
 | Area | ✅ | 🟡 | ⬜ |
 |---|--:|--:|--:|
@@ -121,7 +121,7 @@ Across the full feature matrix — **148 items: ✅ 122 · 🟡 17 · ⬜ 9**
 | Data types | 9 | 2 | 2 |
 | Transactions | 7 | 1 | 1 |
 | Schemas (multi-file) | 6 | 1 | 0 |
-| Catalog / introspection | 18 | 2 | 1 |
+| Catalog / introspection | 20 | 2 | 1 |
 | Functions & dialect | 19 | 2 | 1 |
 | Tooling (psql/pg_dump/GUIs) | 6 | 1 | 0 |
 
@@ -190,10 +190,11 @@ These would require emulating features SQLite fundamentally lacks:
 
 - **`CREATE TYPE`** range / base types (`… AS ENUM` is modeled and `… AS
   (composite)` is recorded in the catalog; range/base are accepted as a no-op).
-- **Part of `pg_catalog`** (`pg_depend`, `pg_statistic`, …) — present but empty.
-  The ones backed by real data are populated: `pg_auth_members` (role
-  membership, so `\du`/`\drg` shows "Member of"), `pg_policy` and
-  `pg_class.relrowsecurity` (so `\d` lists RLS policies).
+- **Planner statistics** (`pg_statistic`, `pg_statistic_ext`) — empty; SQLite
+  keeps stats in a different shape (`sqlite_stat1`), not the Postgres one.
+  Everything backed by real data *is* populated, though: `pg_auth_members`
+  (role membership → `\du`/`\drg`), `pg_policy` + `pg_class.relrowsecurity`
+  (RLS in `\d`), and `pg_depend`/`pg_shdepend` (object dependencies & ownership).
 - No `LISTEN`/`NOTIFY` delivery, and no replication / HA.
 
 ### Accepted but not enforced (no-ops)
