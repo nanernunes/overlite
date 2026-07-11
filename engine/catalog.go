@@ -102,7 +102,15 @@ var registerCatalog = sync.OnceFunc(func() {
 	scalar("session_user", 0, func([]driver.Value) (driver.Value, error) { return catalogRole, nil })
 	scalar("pg_get_userbyid", 1, func([]driver.Value) (driver.Value, error) { return catalogRole, nil })
 	scalar("pg_table_is_visible", 1, func([]driver.Value) (driver.Value, error) { return int64(1), nil })
-	scalar("pg_get_expr", -1, func([]driver.Value) (driver.Value, error) { return "", nil })
+	// pg_get_expr(expr, relation[, pretty]) renders a stored expression. Our
+	// pg_attrdef keeps the default's SQL text as adbin, so returning the first
+	// argument yields the column default for pg_dump; other callers pass NULL.
+	scalar("pg_get_expr", -1, func(args []driver.Value) (driver.Value, error) {
+		if len(args) == 0 || args[0] == nil {
+			return "", nil
+		}
+		return fmt.Sprint(args[0]), nil
+	})
 
 	// Definition-rendering helpers psql calls in \d; we don't reconstruct DDL
 	// yet, so they return empty strings (variadic arg counts via nArg -1).
@@ -465,10 +473,6 @@ var staticCatalogViews = []string{
 	 SELECT 2   AS oid, 'heap'  AS amname, 'heap_tableam_handler' AS amhandler, 't' AS amtype
 	 UNION ALL SELECT 403, 'btree', 'bthandler',   'i'
 	 UNION ALL SELECT 405, 'hash',  'hashhandler', 'i'`,
-
-	`CREATE TEMP VIEW IF NOT EXISTS pg_attrdef AS
-	 SELECT 0 AS oid, 0 AS adrelid, 0 AS adnum, NULL AS adbin
-	 WHERE 0`,
 
 	`CREATE TEMP VIEW IF NOT EXISTS pg_description AS
 	 SELECT 0 AS objoid, 0 AS classoid, 0 AS objsubid, '' AS description

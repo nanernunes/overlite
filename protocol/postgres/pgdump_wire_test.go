@@ -53,8 +53,10 @@ func TestPgDumpIntegration(t *testing.T) {
 	}
 	addr := startServer(t)
 	conn := connect(t, addr)
-	mustExec(t, conn, `CREATE TABLE dept (id SERIAL PRIMARY KEY, name text UNIQUE NOT NULL)`)
-	mustExec(t, conn, `CREATE TABLE emp (id int PRIMARY KEY, dept_id int REFERENCES dept(id))`)
+	mustExec(t, conn, `CREATE TABLE dept (id int PRIMARY KEY, name text NOT NULL)`)
+	mustExec(t, conn, `CREATE TABLE emp (
+		id int PRIMARY KEY, dept_id int REFERENCES dept(id), active boolean DEFAULT true)`)
+	mustExec(t, conn, `CREATE SEQUENCE order_seq START WITH 100 INCREMENT BY 5`)
 
 	host, port, ok := strings.Cut(addr, ":")
 	require.True(t, ok)
@@ -64,8 +66,10 @@ func TestPgDumpIntegration(t *testing.T) {
 
 	dump := string(out)
 	assert.Contains(t, dump, "CREATE TABLE public.dept")
-	assert.Contains(t, dump, "CREATE TABLE public.emp")
-	assert.Contains(t, dump, "id integer")
+	assert.Contains(t, dump, "id integer NOT NULL")             // NOT NULL
+	assert.Contains(t, dump, "active boolean DEFAULT true")     // DEFAULT
+	assert.Contains(t, dump, "ADD CONSTRAINT emp_pkey PRIMARY KEY (id)") // PK constraint
 	assert.Contains(t, dump, "FOREIGN KEY (dept_id) REFERENCES dept(id)")
-	assert.Contains(t, dump, "USING btree")
+	assert.Contains(t, dump, "CREATE SEQUENCE public.order_seq") // sequence
+	assert.Contains(t, dump, "INCREMENT BY 5")
 }

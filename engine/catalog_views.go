@@ -72,6 +72,7 @@ func dynamicCatalogViews(refs []schemaRef) []string {
 		ns,
 		pgClassView(refs),
 		unionOID("pg_attribute", 1249, refs, pgAttributeTmpl),
+		unionOID("pg_attrdef", 2604, refs, pgAttrdefTmpl),
 		unionWrap("pg_index", "2610 AS tableoid, 0 AS indnullsnotdistinct", refs, pgIndexTmpl),
 		unionWrap("pg_constraint", "2606 AS tableoid, NULL AS conparentid2, 0 AS conperiod", refs, pgConstraintTmpl),
 		unionWrap("pg_trigger", "2620 AS tableoid, 0 AS tgparentid", refs, pgTriggerTmpl),
@@ -200,6 +201,14 @@ const pgAttributeTmpl = `SELECT CAST(m.rowid + @OFF@ AS INTEGER) AS attrelid, ti
 FROM @DB@.sqlite_master m JOIN pragma_table_info(m.name,'@DB@') ti
 WHERE m.type IN ('table','view') AND m.name NOT LIKE 'sqlite_%' AND m.name NOT GLOB '_overlite_*'`
 
+// pgAttrdefTmpl exposes column defaults (adbin holds the default's SQL text,
+// which pg_get_expr returns verbatim).
+const pgAttrdefTmpl = `SELECT CAST(m.rowid * 1000 + ti.cid + @OFF@ AS INTEGER) AS oid,
+ CAST(m.rowid + @OFF@ AS INTEGER) AS adrelid, ti.cid + 1 AS adnum, ti.dflt_value AS adbin
+FROM @DB@.sqlite_master m JOIN pragma_table_info(m.name,'@DB@') ti
+WHERE m.type='table' AND m.name NOT LIKE 'sqlite_%' AND m.name NOT GLOB '_overlite_*'
+  AND ti.dflt_value IS NOT NULL`
+
 const pgIndexTmpl = `SELECT idx.rowid + @OFF@ AS indexrelid, tbl.rowid + @OFF@ AS indrelid,
  (SELECT count(*) FROM pragma_index_info(idx.name,'@DB@')) AS indnatts,
  (SELECT count(*) FROM pragma_index_info(idx.name,'@DB@')) AS indnkeyatts,
@@ -236,7 +245,8 @@ FROM @DB@.sqlite_master tbl JOIN pragma_foreign_key_list(tbl.name,'@DB@') fk
 WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%' AND tbl.name NOT GLOB '_overlite_*'
 UNION ALL
 SELECT tbl.rowid*100000 + 99999 + @OFF@, tbl.name || '_pkey', @NS@, 'p', 0,0,1,
- CAST(tbl.rowid + @OFF@ AS INTEGER), 0,0,0,0, ' ',' ',' ', 1,0,1, '','',NULL,
+ CAST(tbl.rowid + @OFF@ AS INTEGER), 0, CAST(tbl.rowid + 90000000 + @OFF@ AS INTEGER), 0, 0,
+ ' ',' ',' ', 1,0,1, '','',NULL,
  (SELECT group_concat(name,', ') FROM pragma_table_info(tbl.name,'@DB@') WHERE pk>0 ORDER BY pk), NULL
 FROM @DB@.sqlite_master tbl
 WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%' AND tbl.name NOT GLOB '_overlite_*'
