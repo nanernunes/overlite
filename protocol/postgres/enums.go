@@ -15,6 +15,9 @@ import (
 
 var reAsEnum = regexp.MustCompile(`(?i)\bas\s+enum\b`)
 
+// reAsComposite matches "AS (" — a composite type definition.
+var reAsComposite = regexp.MustCompile(`(?i)\bas\s*\(`)
+
 // isTypeDDL reports whether sql is a CREATE/ALTER/DROP TYPE statement (used by
 // the extended-query path to route it like other utility DDL).
 func isTypeDDL(sql string) bool {
@@ -56,8 +59,13 @@ func (s *session) createEnumType(sql string, fields []string) (string, error) {
 	name := enumIdent(fields[2])
 	loc := reAsEnum.FindStringIndex(sql)
 	if loc == nil {
-		// Non-enum CREATE TYPE (composite/range/base): accept as a no-op so dumps
-		// and tools don't fail; we don't model these.
+		// CREATE TYPE ... AS (...) — composite: record its name so it shows in
+		// pg_type / \dT (its fields aren't modeled).
+		if reAsComposite.MatchString(sql) {
+			_, err := s.exec("INSERT INTO _overlite_composite_types (typname) VALUES ("+sqlStr(name)+")", nil)
+			return "CREATE TYPE", err
+		}
+		// Range / base types: accept as a no-op so dumps and tools don't fail.
 		return "CREATE TYPE", nil
 	}
 	open := strings.IndexByte(sql[loc[1]:], '(')
@@ -162,6 +170,9 @@ func (s *session) dropType(rest []string) error {
 			return err
 		}
 		if _, err := s.exec("DELETE FROM _overlite_enums WHERE typname = "+sqlStr(name), nil); err != nil {
+			return err
+		}
+		if _, err := s.exec("DELETE FROM _overlite_composite_types WHERE typname = "+sqlStr(name), nil); err != nil {
 			return err
 		}
 	}

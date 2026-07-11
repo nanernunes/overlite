@@ -87,6 +87,7 @@ func dynamicCatalogViews(refs []schemaRef) []string {
 		infoSequencesView(),
 		infoCheckConstraintsView(),
 		infoRoutinesView(),
+		pgProcView(),
 	}
 }
 
@@ -114,20 +115,12 @@ func infoSequencesView() string {
 	 FROM _overlite_sequences`
 }
 
-// infoCheckConstraintsView / infoRoutinesView are present but empty (we don't
-// enumerate CHECK clauses or model routines yet).
+// infoCheckConstraintsView is present but empty (we don't enumerate CHECK
+// clauses yet). infoRoutinesView is defined in catalog.go from the function list.
 func infoCheckConstraintsView() string {
 	return `CREATE TEMP VIEW "information_schema.check_constraints" AS
 	 SELECT ` + sqlQuote(catalogDBName) + ` AS constraint_catalog, 'public' AS constraint_schema,
 	        '' AS constraint_name, '' AS check_clause WHERE 0`
-}
-
-func infoRoutinesView() string {
-	return `CREATE TEMP VIEW "information_schema.routines" AS
-	 SELECT ` + sqlQuote(catalogDBName) + ` AS specific_catalog, 'public' AS specific_schema,
-	        '' AS specific_name, ` + sqlQuote(catalogDBName) + ` AS routine_catalog,
-	        'public' AS routine_schema, '' AS routine_name, 'FUNCTION' AS routine_type,
-	        '' AS data_type, '' AS routine_definition WHERE 0`
 }
 
 // pgTriggerTmpl exposes each schema's SQLite triggers (sqlite_master type
@@ -192,7 +185,8 @@ const pgClassTmpl = `SELECT CAST(m.rowid + @OFF@ AS INTEGER) AS oid, m.name AS r
  CASE m.type WHEN 'view' THEN 'v' WHEN 'index' THEN 'i' ELSE 'r' END AS relkind,
  (SELECT count(*) FROM pragma_table_info(m.name,'@DB@')) AS relnatts,
  0 AS relchecks, 0 AS relhasrules,
- 0 AS relhastriggers, -- kept 0: psql's \d trigger query needs unnest WITH ORDINALITY
+ CASE WHEN EXISTS(SELECT 1 FROM @DB@.sqlite_master trg WHERE trg.type='trigger' AND trg.tbl_name=m.name)
+      THEN 1 ELSE 0 END AS relhastriggers,
  0 AS relhassubclass, 0 AS relrowsecurity,
  0 AS relforcerowsecurity, 1 AS relispopulated, 'd' AS relreplident, 0 AS relispartition,
  NULL AS relacl, NULL AS reloptions, NULL AS relpartbound, 0 AS relrewrite, 0 AS relminmxid

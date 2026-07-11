@@ -71,9 +71,10 @@ func TestPgDumpIntegration(t *testing.T) {
 	}
 	addr := startServer(t)
 	conn := connect(t, addr)
+	mustExec(t, conn, `CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy')`)
 	mustExec(t, conn, `CREATE TABLE dept (id int PRIMARY KEY, name text UNIQUE NOT NULL)`)
 	mustExec(t, conn, `CREATE TABLE emp (
-		id int PRIMARY KEY, dept_id int REFERENCES dept(id), active boolean DEFAULT true)`)
+		id int PRIMARY KEY, dept_id int REFERENCES dept(id), active boolean DEFAULT true, m mood)`)
 	mustExec(t, conn, `CREATE SEQUENCE order_seq START WITH 100 INCREMENT BY 5`)
 
 	host, port, ok := strings.Cut(addr, ":")
@@ -91,4 +92,5 @@ func TestPgDumpIntegration(t *testing.T) {
 	assert.Contains(t, dump, "ADD CONSTRAINT dept_name_key UNIQUE (name)") // UNIQUE
 	assert.Contains(t, dump, "CREATE SEQUENCE public.order_seq")           // sequence
 	assert.Contains(t, dump, "INCREMENT BY 5")
+	assert.Contains(t, dump, "CREATE TYPE public.mood AS ENUM") // enum type (needs PREPARE/EXECUTE)
 }

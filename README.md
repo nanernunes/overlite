@@ -143,14 +143,12 @@ These would require emulating features SQLite fundamentally lacks:
 
 ### Not implemented yet (but feasible)
 
-- **`CREATE TYPE`** composite / range / base types (only `… AS ENUM` is modeled;
-  other forms are accepted as a no-op).
+- **`CREATE TYPE`** range / base types (`… AS ENUM` is modeled and `… AS
+  (composite)` is recorded in the catalog; range/base are accepted as a no-op).
 - **Multiple users / `pg_hba`-style** host rules (one configured role/password).
-- **Populated `pg_proc`** — `\df` runs but lists nothing.
 - **Remainder of `pg_catalog`** (`pg_depend`, `pg_statistic`, …) — present but
   empty.
-- **Query-cancellation aside**, no `LISTEN`/`NOTIFY` delivery, and no replication
-  / HA.
+- No `LISTEN`/`NOTIFY` delivery, and no replication / HA.
 
 ### Accepted but not enforced (no-ops)
 
@@ -169,16 +167,16 @@ These run so migrations, ORMs, and dumps proceed, but have no real effect:
 
 - **Roles** — `CREATE`/`ALTER`/`DROP ROLE`/`USER` show up in `\du`, but
   attributes aren't enforced.
-- **Enum columns** — enforced via `TEXT` + `CHECK`, but there's no enum
-  ordering/comparison and `\dT+` doesn't list elements.
+- **Enum columns** — enforced via `TEXT` + `CHECK` and `\dT+` lists the
+  elements, but there's no enum ordering/comparison.
+- **Composite types** — `CREATE TYPE … AS (…)` shows in `pg_type`/`\dT`, but the
+  fields aren't modeled (no composite storage).
 - **`DISTINCT ON (...)`** — rewritten to a `ROW_NUMBER()` window; needs an
   explicit column list (not `SELECT *`).
-- **`interval` arithmetic** — `ts ± interval '1 day'` works; no bare `interval`
-  value type and no `age()`.
-- **`pg_trigger`** — populated and queryable, but psql's `\d` *Triggers* section
-  needs `unnest … WITH ORDINALITY`.
-- **`information_schema`** — constraints/columns/views/sequences populated;
-  `check_constraints`/`routines` are empty and column precision is `NULL`.
+- **`interval`** — `ts ± interval '1 day'` and `age()` work; no bare `interval`
+  value type.
+- **`information_schema`** — constraints/columns/views/sequences/routines
+  populated; `check_constraints` is empty and column precision is `NULL`.
 - **Type OIDs** — common ones are faithful; all integers advertise as `int8`
   (catalog oids exceed int4) and `numeric` advertises as `float8`.
 - **`SET search_path`** and **`COLLATE`** — accepted; unqualified names always

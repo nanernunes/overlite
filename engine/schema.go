@@ -178,6 +178,9 @@ func setupConnection(ctx context.Context, exec func(string) error, query func(st
 	if err := exec(enumLabelsTableDDL); err != nil {
 		return err
 	}
+	if err := exec(compositeTypesTableDDL); err != nil {
+		return err
+	}
 	// Expose each sequence as a one-row relation (last_value/is_called), as
 	// Postgres does, so pg_dump can read its current value with
 	// "SELECT last_value, is_called FROM <seq>".

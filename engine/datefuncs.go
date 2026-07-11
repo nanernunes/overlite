@@ -317,3 +317,105 @@ func toCharFn(args []driver.Value) (driver.Value, error) {
 	}
 	return toChar(t, fmt.Sprint(args[1])), nil
 }
+
+// ageFn implements age(ts) = now() - ts and age(a, b) = a - b, rendered as a
+// Postgres calendar interval ("1 year 2 mons 5 days").
+func ageFn(args []driver.Value) (driver.Value, error) {
+	switch len(args) {
+	case 1:
+		if args[0] == nil {
+			return nil, nil
+		}
+		b, ok := parseTime(args[0])
+		if !ok {
+			return nil, nil
+		}
+		return ageInterval(time.Now(), b), nil
+	case 2:
+		if args[0] == nil || args[1] == nil {
+			return nil, nil
+		}
+		a, ok1 := parseTime(args[0])
+		b, ok2 := parseTime(args[1])
+		if !ok1 || !ok2 {
+			return nil, nil
+		}
+		return ageInterval(a, b), nil
+	}
+	return nil, nil
+}
+
+// ageInterval returns the calendar interval a - b as Postgres formats it,
+// breaking the difference into years, months, days, and a time component.
+func ageInterval(a, b time.Time) string {
+	neg := a.Before(b)
+	if neg {
+		a, b = b, a
+	}
+	sec := a.Second() - b.Second()
+	min := a.Minute() - b.Minute()
+	hour := a.Hour() - b.Hour()
+	day := a.Day() - b.Day()
+	month := int(a.Month()) - int(b.Month())
+	year := a.Year() - b.Year()
+
+	if sec < 0 {
+		sec += 60
+		min--
+	}
+	if min < 0 {
+		min += 60
+		hour--
+	}
+	if hour < 0 {
+		hour += 24
+		day--
+	}
+	if day < 0 {
+		// Borrow the number of days in the month preceding a.
+		day += daysInMonth(a.Year(), int(a.Month())-1)
+		month--
+	}
+	if month < 0 {
+		month += 12
+		year--
+	}
+
+	var parts []string
+	add := func(n int, unit string) {
+		if n != 0 {
+			s := unit
+			if n != 1 && n != -1 {
+				s += "s"
+			}
+			parts = append(parts, fmt.Sprintf("%d %s", n, s))
+		}
+	}
+	sign := 1
+	if neg {
+		sign = -1
+	}
+	add(sign*year, "year")
+	// Postgres abbreviates months as "mon"/"mons".
+	if month != 0 {
+		u := "mon"
+		if month != 1 {
+			u += "s"
+		}
+		parts = append(parts, fmt.Sprintf("%d %s", sign*month, u))
+	}
+	add(sign*day, "day")
+	if hour != 0 || min != 0 || sec != 0 {
+		parts = append(parts, fmt.Sprintf("%02d:%02d:%02d", sign*hour, min, sec))
+	}
+	if len(parts) == 0 {
+		return "00:00:00"
+	}
+	return strings.Join(parts, " ")
+}
+
+// daysInMonth returns the number of days in month m of year y (m may be 0 or 13,
+// wrapping to the adjacent year).
+func daysInMonth(y, m int) int {
+	return time.Date(y, time.Month(m)+1, 0, 0, 0, 0, 0, time.UTC).Day()
+}

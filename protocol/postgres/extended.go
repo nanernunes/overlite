@@ -39,6 +39,10 @@ type session struct {
 
 	// canceler interrupts this connection's in-flight query on a CancelRequest.
 	canceler *canceler
+
+	// sqlPrepared holds SQL-level prepared statements (PREPARE name AS ...),
+	// which psql/pg_dump use; distinct from the wire-protocol prepared map.
+	sqlPrepared map[string]string
 }
 
 type prepared struct {
@@ -71,12 +75,13 @@ type portal struct {
 
 func newSession(ctx context.Context, c *wireConn, db core.Session) *session {
 	return &session{
-		ctx:      ctx,
-		c:        c,
-		db:       db,
-		prepared: map[string]*prepared{},
-		portals:  map[string]*portal{},
-		seqCurr:  map[string]int64{},
+		ctx:         ctx,
+		c:           c,
+		db:          db,
+		prepared:    map[string]*prepared{},
+		portals:     map[string]*portal{},
+		seqCurr:     map[string]int64{},
+		sqlPrepared: map[string]string{},
 	}
 }
 

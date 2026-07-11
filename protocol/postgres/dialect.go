@@ -24,7 +24,8 @@ func rewrite(sql string) string {
 	sql = rewriteEscapeStrings(sql)
 	sql = rewriteNiladicFuncs(sql)
 	sql = rewriteInformationSchema(sql)
-	sql = rewriteOperatorSyntax(sql) // unwrap OPERATOR(=)/OPERATOR(~) before ANY/regex handling
+	sql = rewriteOperatorSyntax(sql)        // unwrap OPERATOR(=)/OPERATOR(~) before ANY/regex handling
+	sql = rewriteArrayToStringSubquery(sql) // before ARRAY(subquery) is unwrapped
 	sql = rewriteArraySubquery(sql)
 	sql = rewriteAnyArray(sql)
 	sql = rewriteAnyOperator(sql)
@@ -32,6 +33,7 @@ func rewrite(sql string) string {
 	sql = rewriteGenerateSeries(sql)
 	sql = rewritePgOptionsToTable(sql)
 	sql = rewriteUnnest(sql)
+	sql = rewritePartitionSRF(sql)
 	sql = rewriteCasts(sql)
 	sql = rewriteJSONContains(sql) // after casts, so "x::jsonb @> ..." operands are whole
 	sql = rewriteArraySubscript(sql)
@@ -1022,29 +1024,44 @@ func arrayLiteralElems(s string) ([]string, bool) {
 // reWithOrdinality matches the "WITH ORDINALITY" clause SQLite lacks.
 var reWithOrdinality = regexp.MustCompile(`(?i)\s+WITH\s+ORDINALITY`)
 
-// rewriteUnnest strips WITH ORDINALITY and replaces "unnest(...) [AS alias(cols)]"
-// — array expansion with a column-alias list, neither of which SQLite supports —
-// with an empty relation carrying the aliased columns. The calls appear in
-// catalog/dump queries over columns that are empty here, so no rows are lost.
+// rewriteUnnest replaces "unnest(...) [WITH ORDINALITY] [AS alias(cols)]" — array
+// expansion, ordinality, and a column-alias list, none of which SQLite supports.
+// A literal array becomes a UNION of rows (with a 1-based ordinality column when
+// requested); any other argument becomes an empty relation carrying the aliased
+// columns (those calls appear in catalog/dump queries that yield no rows here).
 func rewriteUnnest(sql string) string {
-	sql = reWithOrdinality.ReplaceAllString(sql, "")
 	low := strings.ToLower(sql)
 	for from := 0; ; {
 		i := indexWordCall(low, "unnest", from)
 		if i < 0 {
-			return sql
+			break
 		}
 		open := i + len("unnest")
 		for open < len(sql) && sql[open] == ' ' {
 			open++
 		}
-		_, end, ok := readParenArgs(sql, open)
+		args, end, ok := readParenArgs(sql, open)
 		if !ok {
-			return sql
+			from = i + len("unnest")
+			continue
 		}
-		args, _, _ := readParenArgs(sql, open)
-		cols, alias, next := []string{"unnest"}, "", end
-		p := skipSpaces(sql, end)
+		next := end
+
+		// Optional WITH ORDINALITY.
+		withOrd := false
+		if p := skipSpaces(sql, end); hasWordAt(low, p, "with") {
+			if q := skipSpaces(sql, p+len("with")); hasWordAt(low, q, "ordinality") {
+				withOrd, next = true, skipSpaces(sql, q+len("ordinality"))
+			}
+		}
+
+		// Default column names, then an optional AS alias(cols) override.
+		cols := []string{"unnest"}
+		if withOrd {
+			cols = []string{"unnest", "ordinality"}
+		}
+		alias := ""
+		p := skipSpaces(sql, next)
 		if hasWordAt(low, p, "as") {
 			p = skipSpaces(sql, p+2)
 		}
@@ -1052,7 +1069,7 @@ func rewriteUnnest(sql string) string {
 		for p < len(sql) && isWordByte(sql[p]) {
 			p++
 		}
-		if p > as { // AS alias present
+		if p > as {
 			alias, next = sql[as:p], p
 			if q := skipSpaces(sql, p); q < len(sql) && sql[q] == '(' {
 				if inner, cend, ok2 := readParenArgs(sql, q); ok2 {
@@ -1060,17 +1077,24 @@ func rewriteUnnest(sql string) string {
 				}
 			}
 		}
-		col := strings.TrimSpace(cols[0])
+
+		valCol := strings.TrimSpace(cols[0])
+		ordCol := ""
+		if withOrd && len(cols) > 1 {
+			ordCol = strings.TrimSpace(cols[1])
+		}
+
 		var b strings.Builder
 		if elems, isArr := arrayLiteralElems(args); isArr && len(elems) > 0 {
-			// unnest('{a,b,c}') -> one row per element (pg_dump drives bulk
-			// catalog fetches this way).
 			b.WriteString("(")
 			for k, e := range elems {
 				if k > 0 {
 					b.WriteString(" UNION ALL ")
 				}
-				b.WriteString("SELECT " + e + " AS " + col)
+				b.WriteString("SELECT " + e + " AS " + valCol)
+				if ordCol != "" {
+					b.WriteString(", " + strconv.Itoa(k+1) + " AS " + ordCol)
+				}
 			}
 			b.WriteString(")")
 		} else {
@@ -1083,6 +1107,134 @@ func rewriteUnnest(sql string) string {
 			}
 			b.WriteString(" WHERE 0)")
 		}
+		if alias != "" {
+			b.WriteString(" " + alias)
+		}
+		repl := b.String()
+		sql = sql[:i] + repl + sql[next:]
+		low = strings.ToLower(sql)
+		from = i + len(repl)
+	}
+	// A WITH ORDINALITY on some other set-returning function we don't model.
+	return reWithOrdinality.ReplaceAllString(sql, "")
+}
+
+// rewriteArrayToStringSubquery turns array_to_string(array(SELECT expr FROM ...
+// ORDER BY ...), sep) into (SELECT group_concat(_v, sep) FROM (SELECT expr AS _v
+// FROM ... ORDER BY ...)) — the shape psql \dT+ uses to list an enum's elements.
+func rewriteArrayToStringSubquery(sql string) string {
+	low := strings.ToLower(sql)
+	for from := 0; ; {
+		i := indexWordCall(low, "array_to_string", from)
+		if i < 0 {
+			return sql
+		}
+		open := i + len("array_to_string")
+		for open < len(sql) && sql[open] == ' ' {
+			open++
+		}
+		args, end, ok := readParenArgs(sql, open)
+		if !ok {
+			return sql
+		}
+		parts := splitTopLevel(args)
+		inner, sep, ok := arraySubqueryArg(parts)
+		if !ok {
+			from = end
+			continue
+		}
+		body := strings.TrimSpace(inner)[len("select"):]
+		aliased := "SELECT " + strings.TrimSpace(body) + " AS _v"
+		if fi := indexTopLevelWord(body, 0, "from"); fi >= 0 {
+			aliased = "SELECT " + strings.TrimSpace(body[:fi]) + " AS _v " + body[fi:]
+		}
+		repl := "(SELECT group_concat(_v, " + sep + ") FROM (" + aliased + "))"
+		sql = sql[:i] + repl + sql[end:]
+		low = strings.ToLower(sql)
+		from = i + len(repl)
+	}
+}
+
+// arraySubqueryArg pulls the "array(SELECT ...)" inner query and the separator
+// out of an array_to_string argument list.
+func arraySubqueryArg(parts []string) (inner, sep string, ok bool) {
+	if len(parts) < 2 {
+		return "", "", false
+	}
+	arr := strings.TrimSpace(parts[0])
+	if !strings.HasPrefix(strings.ToLower(arr), "array") {
+		return "", "", false
+	}
+	ap := len("array")
+	for ap < len(arr) && arr[ap] == ' ' {
+		ap++
+	}
+	if ap >= len(arr) || arr[ap] != '(' {
+		return "", "", false
+	}
+	body, _, okp := readParenArgs(arr, ap)
+	if !okp || !strings.HasPrefix(strings.ToLower(strings.TrimSpace(body)), "select") {
+		return "", "", false
+	}
+	return body, strings.TrimSpace(parts[1]), true
+}
+
+// rewritePartitionSRF replaces the partition set-returning functions (used in
+// FROM with a column-alias list, e.g. "pg_partition_ancestors(x) AS a(relid,
+// depth)" in psql's \d trigger query) with an empty relation carrying those
+// columns — we have no partitioned tables.
+func rewritePartitionSRF(sql string) string {
+	for _, n := range []string{"pg_partition_ancestors", "pg_partition_tree", "pg_partition_root"} {
+		sql = rewriteEmptyTableFunc(sql, n)
+	}
+	return sql
+}
+
+// rewriteEmptyTableFunc replaces "name(...) [AS alias(cols)]" with an empty
+// relation "(SELECT NULL AS col, ... WHERE 0) [alias]".
+func rewriteEmptyTableFunc(sql, name string) string {
+	low := strings.ToLower(sql)
+	lname := strings.ToLower(name)
+	for from := 0; ; {
+		i := indexWordCall(low, lname, from)
+		if i < 0 {
+			return sql
+		}
+		open := i + len(name)
+		for open < len(sql) && sql[open] == ' ' {
+			open++
+		}
+		_, end, ok := readParenArgs(sql, open)
+		if !ok {
+			from = i + len(name)
+			continue
+		}
+		cols, alias, next := []string{name}, "", end
+		p := skipSpaces(sql, end)
+		if hasWordAt(low, p, "as") {
+			p = skipSpaces(sql, p+2)
+		}
+		as := p
+		for p < len(sql) && isWordByte(sql[p]) {
+			p++
+		}
+		if p > as {
+			alias, next = sql[as:p], p
+			if q := skipSpaces(sql, p); q < len(sql) && sql[q] == '(' {
+				if inner, cend, ok2 := readParenArgs(sql, q); ok2 {
+					cols, next = splitTopLevel(inner), cend
+				}
+			}
+		}
+		var b strings.Builder
+		b.WriteString("(SELECT ")
+		for k, c := range cols {
+			if k > 0 {
+				b.WriteString(", ")
+			}
+			b.WriteString("NULL AS " + strings.TrimSpace(c))
+		}
+		b.WriteString(" WHERE 0)")
 		if alias != "" {
 			b.WriteString(" " + alias)
 		}

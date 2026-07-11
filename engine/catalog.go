@@ -239,6 +239,7 @@ var registerCatalog = sync.OnceFunc(func() {
 	scalar("date_trunc", 2, dateTruncFn)
 	scalar("date_part", 2, datePartFn)
 	scalar("to_char", 2, toCharFn)
+	scalar("age", -1, ageFn)
 
 	scalar("regexp", 2, func(args []driver.Value) (driver.Value, error) {
 		if len(args) != 2 {
@@ -446,6 +447,8 @@ var staticCatalogViews = []string{
 	 UNION ALL SELECT 2950, 'uuid',      11, 10, 'b', 'U', 16, 0, 0, 0, 2951, 0, 0, -1, 0, 0, NULL, ','
 	 UNION ALL SELECT CAST(rowid + 90000000 AS INTEGER), typname, 2200, 10, 'e', 'E', 4, 1, 0, 0, 0, 0, 0, -1, 0, 0, NULL, ','
 	           FROM _overlite_enum_types
+	 UNION ALL SELECT CAST(rowid + 95000000 AS INTEGER), typname, 2200, 10, 'c', 'C', -1, 0, 0, 0, 0, 0, 0, -1, 0, 0, NULL, ','
+	           FROM _overlite_composite_types
 	 ) ov_t`,
 
 	`CREATE TEMP VIEW IF NOT EXISTS pg_enum AS
@@ -615,15 +618,49 @@ var staticCatalogViews = []string{
 	        start_value AS seqstart, increment AS seqincrement, max_value AS seqmax,
 	        min_value AS seqmin, cache_size AS seqcache, is_cycled AS seqcycle
 	 FROM _overlite_sequences`,
+}
 
-	// No user-defined functions yet; empty so \df executes.
-	`CREATE TEMP VIEW IF NOT EXISTS pg_proc AS
-	 SELECT 0 AS oid, '' AS proname, 11 AS pronamespace, 10 AS proowner,
-	        0 AS prolang, 'f' AS prokind, 0 AS prorettype, '' AS proargtypes,
-	        0 AS pronargs, 0 AS proretset, NULL AS proacl, '' AS prosrc, NULL AS probin,
-	        'v' AS provolatile, 0 AS proisstrict, NULL AS proargmodes, NULL AS proargnames,
-	        NULL AS proallargtypes, 0 AS prosecdef, NULL AS proconfig, 100 AS procost,
-	        0 AS prorows, 0 AS provariadic, 0 AS prosupport, 0 AS proleakproof,
-	        's' AS proparallel, NULL AS proargdefaults, 0 AS pronargdefaults, '' AS prosqlbody
-	 WHERE 0`,
+// catalogFunctionNames are the functions overlite provides; they populate
+// pg_proc and information_schema.routines so \df and tools can list them.
+var catalogFunctionNames = []string{
+	"version", "now", "age",
+	"current_schema", "current_schemas", "current_database", "current_user",
+	"session_user", "current_setting", "format_type", "quote_ident", "quote_literal",
+	"date_trunc", "date_part", "to_char",
+	"gen_random_uuid", "uuid_generate_v4",
+	"array_to_string", "array_agg", "array_length",
+	"json_contains",
+	"pg_get_indexdef", "pg_get_constraintdef", "pg_get_triggerdef", "pg_get_expr",
+	"has_table_privilege", "has_schema_privilege",
+}
+
+// pgProcView builds pg_proc from the provided-function list (all in pg_catalog).
+func pgProcView() string {
+	const row = `SELECT %d AS oid, %s AS proname, 11 AS pronamespace, 10 AS proowner,` +
+		` 12 AS prolang, 'f' AS prokind, 25 AS prorettype, '' AS proargtypes,` +
+		` 0 AS pronargs, 0 AS proretset, NULL AS proacl, '' AS prosrc, NULL AS probin,` +
+		` 'v' AS provolatile, 0 AS proisstrict, NULL AS proargmodes, NULL AS proargnames,` +
+		` NULL AS proallargtypes, 0 AS prosecdef, NULL AS proconfig, 100 AS procost,` +
+		` 0 AS prorows, 0 AS provariadic, 0 AS prosupport, 0 AS proleakproof,` +
+		` 's' AS proparallel, NULL AS proargdefaults, 0 AS pronargdefaults, '' AS prosqlbody,` +
+		` 1255 AS tableoid`
+	parts := make([]string, len(catalogFunctionNames))
+	for i, name := range catalogFunctionNames {
+		parts[i] = fmt.Sprintf(row, 100000+i, sqlQuote(name))
+	}
+	return "CREATE TEMP VIEW pg_proc AS " + strings.Join(parts, " UNION ALL ")
+}
+
+// infoRoutinesView builds information_schema.routines from the same list.
+func infoRoutinesView() string {
+	const row = `SELECT %[2]s AS specific_catalog, 'pg_catalog' AS specific_schema,` +
+		` %[1]s || '_' || %[3]d AS specific_name, %[2]s AS routine_catalog,` +
+		` 'pg_catalog' AS routine_schema, %[1]s AS routine_name, 'FUNCTION' AS routine_type,` +
+		` 'text' AS data_type, NULL AS routine_definition`
+	cat := sqlQuote(catalogDBName)
+	parts := make([]string, len(catalogFunctionNames))
+	for i, name := range catalogFunctionNames {
+		parts[i] = fmt.Sprintf(row, sqlQuote(name), cat, 100000+i)
+	}
+	return `CREATE TEMP VIEW "information_schema.routines" AS ` + strings.Join(parts, " UNION ALL ")
 }

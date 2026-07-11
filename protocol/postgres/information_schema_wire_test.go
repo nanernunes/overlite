@@ -81,7 +81,9 @@ func TestInformationSchemaMisc(t *testing.T) {
 		`SELECT table_name FROM information_schema.views WHERE table_schema = 'public'`, 0), "v")
 	assert.Contains(t, queryColumn(t, conn,
 		`SELECT sequence_name FROM information_schema.sequences`, 0), "s")
-	// routines / check_constraints exist and are queryable (empty).
+	// routines lists the provided functions; check_constraints is queryable (empty).
+	assert.Contains(t, queryColumn(t, conn,
+		`SELECT routine_name FROM information_schema.routines`, 0), "version")
 	assert.Empty(t, queryColumn(t, conn,
-		`SELECT routine_name FROM information_schema.routines`, 0))
+		`SELECT constraint_name FROM information_schema.check_constraints`, 0))
 }

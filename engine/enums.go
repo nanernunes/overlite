@@ -56,3 +56,10 @@ const enumLabelsTableDDL = `CREATE TABLE IF NOT EXISTS _overlite_enums (
   label     TEXT,
   sortorder REAL
 )`
+
+// Composite types (CREATE TYPE ... AS (...)) are recorded by name so they show
+// in pg_type (typtype 'c') and \dT; their fields aren't modeled (SQLite has no
+// composite storage).
+const compositeTypesTableDDL = `CREATE TABLE IF NOT EXISTS _overlite_composite_types (
+  typname TEXT PRIMARY KEY COLLATE NOCASE
+)`

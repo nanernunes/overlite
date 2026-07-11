@@ -290,6 +290,10 @@ func (s *session) handleSimpleQuery(body []byte) error {
 		return s.c.sendCommandComplete(tag)
 	}
 
+	if handled, err := s.trySQLPrepare(sql); handled {
+		return err
+	}
+
 	if cs, ok := parseCopy(sql); ok {
 		return s.handleCopy(cs)
 	}
