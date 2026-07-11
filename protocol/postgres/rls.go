@@ -413,7 +413,8 @@ func (s *session) tryRLSInsert(sql string, params []core.Value) (bool, *core.Res
 	}
 	low := strings.ToLower(sql)
 	// Forms we don't rewrite for the check: enforce default-deny, else allow.
-	if valuesIdx < 0 || strings.Contains(low, "returning") || strings.Contains(low, "on conflict") {
+	// (A trailing RETURNING is fine — it's stripped from the value list below.)
+	if valuesIdx < 0 || strings.Contains(low, "on conflict") {
 		if expr == "(0)" {
 			return true, nil, fmt.Errorf("new row violates row-level security policy for table %q", bare)
 		}
@@ -425,7 +426,11 @@ func (s *session) tryRLSInsert(sql string, params []core.Value) (bool, *core.Res
 	if len(cols) == 0 {
 		return false, nil, nil
 	}
-	values := strings.TrimRight(sql[valuesIdx+len("values"):], "; \t\n")
+	after := sql[valuesIdx+len("values"):]
+	if ri := topLevelKeyword(after, "returning"); ri >= 0 {
+		after = after[:ri] // the VALUES tuples end before RETURNING
+	}
+	values := strings.TrimRight(after, "; \t\n")
 	collist := strings.Join(cols, ", ")
 	cte := "WITH _rls_src (" + collist + ") AS (VALUES " + values + ") "
 

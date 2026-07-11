@@ -122,6 +122,35 @@ func TestRLSInsertParameterized(t *testing.T) {
 	assert.Equal(t, 1, n)
 }
 
+// TestRLSInsertReturning: WITH CHECK is enforced even when the INSERT carries a
+// RETURNING clause, and the returned row still comes back on success.
+func TestRLSInsertReturning(t *testing.T) {
+	addr := rlsSetup(t)
+	ctx := context.Background()
+	alice := connectAs(t, addr, "alice", "a")
+
+	// Own row: accepted, and RETURNING yields it.
+	var id int
+	require.NoError(t, alice.QueryRow(ctx,
+		`INSERT INTO docs VALUES (40, 'alice', 'r') RETURNING id`).Scan(&id))
+	assert.Equal(t, 40, id)
+
+	// Parameterized RETURNING, own row.
+	require.NoError(t, alice.QueryRow(ctx,
+		`INSERT INTO docs VALUES ($1, $2, $3) RETURNING id`, 41, "alice", "r").Scan(&id))
+	assert.Equal(t, 41, id)
+
+	// Foreign row is rejected despite RETURNING.
+	err := alice.QueryRow(ctx,
+		`INSERT INTO docs VALUES (42, 'bob', 'r') RETURNING id`).Scan(&id)
+	require.Error(t, err)
+
+	admin := connectAs(t, addr, "postgres", "adminpw")
+	var n int
+	require.NoError(t, admin.QueryRow(ctx, `SELECT count(*) FROM docs WHERE id IN (40,41,42)`).Scan(&n))
+	assert.Equal(t, 2, n)
+}
+
 // TestRLSDefaultDeny: with RLS enabled and no policy for the command, a subject
 // sees nothing.
 func TestRLSDefaultDeny(t *testing.T) {
