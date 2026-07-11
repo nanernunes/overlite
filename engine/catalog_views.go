@@ -42,10 +42,23 @@ func dynamicCatalogViews(refs []schemaRef) []string {
 		union("pg_attribute", refs, pgAttributeTmpl),
 		union("pg_index", refs, pgIndexTmpl),
 		union("pg_constraint", refs, pgConstraintTmpl),
+		union("pg_trigger", refs, pgTriggerTmpl),
 		union(`"information_schema.tables"`, refs, infoTablesTmpl),
 		union(`"information_schema.columns"`, refs, infoColumnsTmpl),
 	}
 }
+
+// pgTriggerTmpl exposes each schema's SQLite triggers (sqlite_master type
+// 'trigger') as pg_trigger rows, with tgrelid pointing at the owning table's
+// pg_class oid so psql's \d lists them.
+const pgTriggerTmpl = `SELECT CAST(trg.rowid + 70000000 + @OFF@ AS INTEGER) AS oid,
+ CAST(tbl.rowid + @OFF@ AS INTEGER) AS tgrelid, trg.name AS tgname, 0 AS tgfoid, 0 AS tgtype,
+ 'O' AS tgenabled, 0 AS tgisinternal, 0 AS tgconstrrelid, 0 AS tgconstrindid, 0 AS tgconstraint,
+ 0 AS tgdeferrable, 0 AS tginitdeferred, 0 AS tgnargs, '' AS tgattr, '' AS tgargs,
+ NULL AS tgqual, NULL AS tgoldtable, NULL AS tgnewtable
+FROM @DB@.sqlite_master trg
+JOIN @DB@.sqlite_master tbl ON tbl.name = trg.tbl_name AND tbl.type = 'table'
+WHERE trg.type = 'trigger' AND trg.name NOT LIKE 'sqlite_%' AND trg.name NOT GLOB '_overlite_*'`
 
 // pgClassView is pg_class over every schema, plus the sequences (relkind 'S')
 // that live in the main/public database, so \ds and \d <seq> find them.
@@ -78,7 +91,9 @@ const pgClassTmpl = `SELECT CAST(m.rowid + @OFF@ AS INTEGER) AS oid, m.name AS r
  0 AS relisshared, 'p' AS relpersistence,
  CASE m.type WHEN 'view' THEN 'v' WHEN 'index' THEN 'i' ELSE 'r' END AS relkind,
  (SELECT count(*) FROM pragma_table_info(m.name,'@DB@')) AS relnatts,
- 0 AS relchecks, 0 AS relhasrules, 0 AS relhastriggers, 0 AS relhassubclass, 0 AS relrowsecurity,
+ 0 AS relchecks, 0 AS relhasrules,
+ 0 AS relhastriggers, -- kept 0: psql's \d trigger query needs unnest WITH ORDINALITY
+ 0 AS relhassubclass, 0 AS relrowsecurity,
  0 AS relforcerowsecurity, 1 AS relispopulated, 'd' AS relreplident, 0 AS relispartition,
  NULL AS relacl, NULL AS reloptions, NULL AS relpartbound, 0 AS relrewrite, 0 AS relminmxid
 FROM @DB@.sqlite_master m

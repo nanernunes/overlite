@@ -77,11 +77,19 @@ var registerCatalog = sync.OnceFunc(func() {
 	// yet, so they return empty strings (variadic arg counts via nArg -1).
 	for _, name := range []string{
 		"pg_get_indexdef", "pg_get_constraintdef", "pg_get_viewdef",
-		"pg_get_triggerdef", "pg_get_partkeydef", "pg_get_ruledef",
+		"pg_get_partkeydef", "pg_get_ruledef",
 		"pg_get_function_identity_arguments", "pg_get_functiondef",
 	} {
 		scalar(name, -1, func([]driver.Value) (driver.Value, error) { return "", nil })
 	}
+	// pg_get_triggerdef renders a trigger's CREATE statement (from the registry
+	// refreshed per connection); the first argument is the trigger oid.
+	scalar("pg_get_triggerdef", -1, func(args []driver.Value) (driver.Value, error) {
+		if len(args) == 0 || args[0] == nil {
+			return "", nil
+		}
+		return lookupTriggerDef(asInt64(args[0])), nil
+	})
 	scalar("pg_relation_is_publishable", -1, func([]driver.Value) (driver.Value, error) { return int64(0), nil })
 	scalar("pg_function_is_visible", 1, func([]driver.Value) (driver.Value, error) { return int64(1), nil })
 	scalar("pg_type_is_visible", 1, func([]driver.Value) (driver.Value, error) { return int64(1), nil })
@@ -421,14 +429,6 @@ var staticCatalogViews = []string{
 
 	`CREATE TEMP VIEW IF NOT EXISTS pg_inherits AS
 	 SELECT 0 AS inhrelid, 0 AS inhparent, 0 AS inhseqno, 0 AS inhdetachpending
-	 WHERE 0`,
-
-	`CREATE TEMP VIEW IF NOT EXISTS pg_trigger AS
-	 SELECT 0 AS oid, 0 AS tgrelid, '' AS tgname, 0 AS tgfoid, 0 AS tgtype,
-	        'O' AS tgenabled, 0 AS tgisinternal, 0 AS tgconstrrelid,
-	        0 AS tgconstrindid, 0 AS tgconstraint, 0 AS tgdeferrable,
-	        0 AS tginitdeferred, 0 AS tgnargs, '' AS tgattr, '' AS tgargs,
-	        NULL AS tgqual, NULL AS tgoldtable, NULL AS tgnewtable
 	 WHERE 0`,
 
 	`CREATE TEMP VIEW IF NOT EXISTS pg_rewrite AS

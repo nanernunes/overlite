@@ -68,6 +68,28 @@ func TestFaithfulTypeOIDs(t *testing.T) {
 	assert.Equal(t, 3.5, j)
 }
 
+func TestPgTriggerPopulated(t *testing.T) {
+	addr := startServer(t)
+	conn := connect(t, addr)
+	mustExec(t, conn, `CREATE TABLE t (id int)`)
+	mustExec(t, conn, `CREATE TABLE audit (msg text)`)
+	mustExec(t, conn, `CREATE TRIGGER t_ai AFTER INSERT ON t BEGIN INSERT INTO audit VALUES ('x'); END`)
+
+	// The trigger appears in pg_trigger, linked to its table.
+	assert.Equal(t, []string{"t_ai"}, queryColumn(t, conn,
+		`SELECT tgname FROM pg_catalog.pg_trigger tr
+		 JOIN pg_catalog.pg_class c ON c.oid = tr.tgrelid
+		 WHERE c.relname = 't' AND NOT tr.tgisinternal`, 0))
+
+	// pg_get_triggerdef renders the definition (registry refreshes per
+	// connection, so read it from a fresh connection).
+	fresh := connect(t, addr)
+	var def string
+	require.NoError(t, fresh.QueryRow(context.Background(),
+		`SELECT pg_get_triggerdef(oid) FROM pg_catalog.pg_trigger WHERE tgname = 't_ai'`).Scan(&def))
+	assert.Contains(t, def, "CREATE TRIGGER t_ai")
+}
+
 func TestAlterTable(t *testing.T) {
 	conn := connect(t, startServer(t))
 	mustExec(t, conn, `CREATE TABLE t (id int, name text)`)

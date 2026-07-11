@@ -179,6 +179,12 @@ func setupConnection(ctx context.Context, exec func(string) error, query func(st
 	if names, err := query("SELECT (rowid + 90000000) || ':' || typname FROM _overlite_enum_types"); err == nil {
 		refreshEnumNames(names)
 	}
+	// Refresh the trigger oid->definition registry that pg_get_triggerdef() reads
+	// (public schema; oid matches the pg_trigger view).
+	if defs, err := query("SELECT (rowid + 70000000) || char(31) || sql FROM sqlite_master" +
+		" WHERE type = 'trigger' AND sql IS NOT NULL AND name NOT GLOB '_overlite_*'"); err == nil {
+		refreshTriggerDefs(defs)
+	}
 
 	refs := schemaRefs(attached)
 	for _, stmt := range staticCatalogViews {
