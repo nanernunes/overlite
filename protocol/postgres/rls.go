@@ -175,6 +175,10 @@ func (s *session) applyRLS(sql string) string {
 		return s.injectRLSWhere(sql, "UPDATE")
 	case "DELETE":
 		return s.injectRLSWhere(sql, "DELETE")
+	case "INSERT":
+		// Filter the read side of INSERT … SELECT: wrapRLSSelect only touches
+		// tables after FROM/JOIN, i.e. the source query, never the target.
+		return s.wrapRLSSelect(sql)
 	}
 	return sql
 }
@@ -444,7 +448,9 @@ func (s *session) tryRLSInsert(sql string, params []core.Value) (bool, *core.Res
 		return false, nil, nil
 	}
 	collist := strings.Join(cols, ", ")
-	cte := "WITH _rls_src (" + collist + ") AS (" + source + ") "
+	// Read-filter the source too, so the count validates exactly the rows the
+	// real INSERT (which is read-filtered by applyRLS) will insert.
+	cte := "WITH _rls_src (" + collist + ") AS (" + s.wrapRLSSelect(source) + ") "
 
 	// The VALUES may carry the same $N placeholders as the original INSERT, so
 	// bind params to both counts.

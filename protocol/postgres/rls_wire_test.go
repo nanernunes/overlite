@@ -257,6 +257,41 @@ func TestRLSUpsertUpdateCheck(t *testing.T) {
 	assert.Equal(t, 1, id)
 }
 
+// TestRLSInsertSelectReadFilter: the source of an INSERT … SELECT is itself
+// RLS-filtered, so only rows the reader may see are copied.
+func TestRLSInsertSelectReadFilter(t *testing.T) {
+	t.Setenv("POSTGRES_PASSWORD", "adminpw")
+	addr := startServer(t)
+	ctx := context.Background()
+	admin := connectAs(t, addr, "postgres", "adminpw")
+	mustExec(t, admin, `CREATE ROLE alice LOGIN PASSWORD 'a'`)
+	mustExec(t, admin, `CREATE TABLE src (id int, owner text)`)
+	mustExec(t, admin, `INSERT INTO src VALUES (1,'alice'),(2,'bob')`)
+	mustExec(t, admin, `GRANT SELECT ON src TO alice`)
+	mustExec(t, admin, `ALTER TABLE src ENABLE ROW LEVEL SECURITY`)
+	mustExec(t, admin, `CREATE POLICY p ON src FOR SELECT USING (owner = current_user)`)
+	mustExec(t, admin, `CREATE TABLE dst (id int, owner text)`) // no RLS on dst
+	mustExec(t, admin, `GRANT ALL ON dst TO alice`)
+
+	alice := connectAs(t, addr, "alice", "a")
+	_, err := alice.Exec(ctx, `INSERT INTO dst SELECT * FROM src`)
+	require.NoError(t, err)
+
+	// Only alice's visible source row was copied.
+	rows, err := admin.Query(ctx, `SELECT id, owner FROM dst ORDER BY id`)
+	require.NoError(t, err)
+	defer rows.Close()
+	var got []string
+	for rows.Next() {
+		var id int
+		var owner string
+		require.NoError(t, rows.Scan(&id, &owner))
+		got = append(got, owner)
+	}
+	require.NoError(t, rows.Err())
+	assert.Equal(t, []string{"alice"}, got, "bob's row was filtered out of the source")
+}
+
 // TestRLSDefaultDeny: with RLS enabled and no policy for the command, a subject
 // sees nothing.
 func TestRLSDefaultDeny(t *testing.T) {
