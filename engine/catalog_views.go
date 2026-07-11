@@ -38,7 +38,7 @@ func dynamicCatalogViews(refs []schemaRef) []string {
 
 	return []string{
 		ns,
-		union("pg_class", refs, pgClassTmpl),
+		pgClassView(refs),
 		union("pg_attribute", refs, pgAttributeTmpl),
 		union("pg_index", refs, pgIndexTmpl),
 		union("pg_constraint", refs, pgConstraintTmpl),
@@ -46,6 +46,29 @@ func dynamicCatalogViews(refs []schemaRef) []string {
 		union(`"information_schema.columns"`, refs, infoColumnsTmpl),
 	}
 }
+
+// pgClassView is pg_class over every schema, plus the sequences (relkind 'S')
+// that live in the main/public database, so \ds and \d <seq> find them.
+func pgClassView(refs []schemaRef) string {
+	parts := make([]string, 0, len(refs)+1)
+	for _, r := range refs {
+		parts = append(parts, frag(pgClassTmpl, r))
+	}
+	for _, r := range refs {
+		if r.DB == "main" {
+			parts = append(parts, frag(pgSequenceClassTmpl, r))
+		}
+	}
+	return "CREATE TEMP VIEW pg_class AS\n" + strings.Join(parts, "\nUNION ALL\n")
+}
+
+// pgSequenceClassTmpl adds one pg_class row per sequence (column order matches
+// pgClassTmpl; names come from the first SELECT in the UNION).
+const pgSequenceClassTmpl = `SELECT CAST(seq.rowid + 80000000 + @OFF@ AS INTEGER) AS oid, seq.seqname AS relname, @NS@ AS relnamespace,
+ 0,0,10,0,0,0,0,0,0,0,
+ 0, 0, 'p', 'S',
+ 1, 0,0,0,0,0,0,1,'d',0,NULL,NULL,NULL,0,0
+FROM _overlite_sequences seq`
 
 const pgClassTmpl = `SELECT CAST(m.rowid + @OFF@ AS INTEGER) AS oid, m.name AS relname, @NS@ AS relnamespace,
  0 AS reltype, 0 AS reloftype, 10 AS relowner, 0 AS relam, 0 AS relfilenode, 0 AS reltablespace,

@@ -167,6 +167,16 @@ func (s *session) handleSimpleQuery(body []byte) error {
 		return s.c.sendCommandComplete(tag)
 	}
 
+	if tag, handled, err := s.trySequenceDDL(sql); handled {
+		if err != nil {
+			if s.tx != nil {
+				s.txFailed = true
+			}
+			return s.c.sendError("42000", err.Error())
+		}
+		return s.c.sendCommandComplete(tag)
+	}
+
 	if cs, ok := parseCopy(sql); ok {
 		return s.handleCopy(cs)
 	}
@@ -180,7 +190,17 @@ func (s *session) handleSimpleQuery(body []byte) error {
 		return s.c.sendCommandComplete(commandTag(rs))
 	}
 
-	rewritten := rewrite(sql)
+	// Expand nextval/currval/... on the raw statement, before the dialect
+	// rewrite runs (rewrite is not string-literal-aware and would mangle a
+	// quoted sequence name).
+	expanded, err := s.expandSequences(sql)
+	if err != nil {
+		if s.tx != nil {
+			s.txFailed = true
+		}
+		return s.c.sendError("42P01", err.Error())
+	}
+	rewritten := rewrite(expanded)
 	logQuery("simple", rewritten)
 	rs, err := s.exec(rewritten, nil)
 	if err != nil {

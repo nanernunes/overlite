@@ -99,6 +99,19 @@ var registerCatalog = sync.OnceFunc(func() {
 		return fmt.Sprint(args[1]), nil // echo the value; we don't apply GUCs
 	})
 
+	scalar("quote_ident", 1, func(args []driver.Value) (driver.Value, error) {
+		if len(args) == 0 || args[0] == nil {
+			return nil, nil
+		}
+		return quoteIdent(fmt.Sprint(args[0])), nil
+	})
+	scalar("quote_literal", 1, func(args []driver.Value) (driver.Value, error) {
+		if len(args) == 0 || args[0] == nil {
+			return nil, nil
+		}
+		return "'" + strings.ReplaceAll(fmt.Sprint(args[0]), "'", "''") + "'", nil
+	})
+
 	scalar("format_type", 2, func(args []driver.Value) (driver.Value, error) {
 		if len(args) == 0 {
 			return nil, nil
@@ -265,6 +278,19 @@ func currentSetting(name string) string {
 	}
 }
 
+// reBareIdent is a lowercase identifier that needs no double-quoting.
+var reBareIdent = regexp.MustCompile(`^[a-z_][a-z0-9_]*$`)
+
+// quoteIdent quotes an SQL identifier the way Postgres' quote_ident() does:
+// bare if it is already a safe lowercase identifier, otherwise double-quoted
+// (with embedded quotes doubled).
+func quoteIdent(s string) string {
+	if reBareIdent.MatchString(s) {
+		return s
+	}
+	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
+}
+
 func asInt64(v driver.Value) int64 {
 	switch n := v.(type) {
 	case int64:
@@ -404,6 +430,14 @@ var staticCatalogViews = []string{
 	        '' AS context, '' AS vartype, '' AS source, NULL AS min_val, NULL AS max_val,
 	        NULL AS enumvals, '' AS boot_val, '' AS reset_val
 	 WHERE 0`,
+
+	// Sequence metadata for \d <seq> and pg_dump (rows come from
+	// _overlite_sequences; oids match the pg_class 'S' rows).
+	`CREATE TEMP VIEW IF NOT EXISTS pg_sequence AS
+	 SELECT CAST(rowid + 80000000 AS INTEGER) AS seqrelid, 20 AS seqtypid,
+	        start_value AS seqstart, increment AS seqincrement, max_value AS seqmax,
+	        min_value AS seqmin, cache_size AS seqcache, is_cycled AS seqcycle
+	 FROM _overlite_sequences`,
 
 	// No user-defined functions yet; empty so \df executes.
 	`CREATE TEMP VIEW IF NOT EXISTS pg_proc AS

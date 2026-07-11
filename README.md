@@ -99,7 +99,7 @@ for a real production system**. ✅ done · 🟡 partial · ⬜ not yet.
 | Backup / restore | 🟡 | `\copy` works; `pg_dump` dumps data but not full schema |
 | Roles & permissions | 🟡 | `CREATE`/`ALTER`/`DROP ROLE`/`USER` in `\du`; `GRANT`/`REVOKE` accepted as no-ops; no enforcement or row-level security |
 | Server-side logic | ⬜ | PL/pgSQL functions & procedures (triggers only in SQLite syntax) |
-| Sequences | ⬜ | `SERIAL` works; no explicit `CREATE SEQUENCE`/`nextval` |
+| Sequences | ✅ | `CREATE`/`ALTER`/`DROP SEQUENCE`, `nextval`/`currval`/`setval`/`lastval`, `\ds`; `DEFAULT nextval()` in DDL not supported (use `SERIAL`) |
 | Rich types | ⬜ | arrays, `uuid`, `enum`, ranges, `interval` arithmetic |
 | Extensions | ⬜ | `CREATE EXTENSION` (uuid-ossp, pgcrypto, postgis, …) |
 | `LISTEN`/`NOTIFY`, query cancellation | ⬜ | |

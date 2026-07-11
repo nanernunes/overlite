@@ -30,10 +30,17 @@ type session struct {
 	// aborted: further statements are rejected until COMMIT/ROLLBACK.
 	tx       core.Tx
 	txFailed bool
+
+	// Sequence state scoped to this session: seqCurr is the last value produced
+	// per sequence (backs currval), seqLast is the most recent one (backs
+	// lastval). Keys are lower-cased sequence names.
+	seqCurr map[string]int64
+	seqLast string
 }
 
 type prepared struct {
 	sql       string // rewritten, ready for the engine
+	raw       string // original statement, kept for sequence expansion (pre-rewrite)
 	numParams int
 	// util is set for intercepted statements (SET/SHOW/...) that bypass the
 	// engine and return a synthetic result.
@@ -41,6 +48,8 @@ type prepared struct {
 	// txControl is "BEGIN"/"COMMIT"/"ROLLBACK" for transaction-control
 	// statements, else "".
 	txControl string
+	// seqDDL holds the raw CREATE/ALTER/DROP SEQUENCE statement, run at Execute.
+	seqDDL string
 }
 
 type portal struct {
@@ -56,6 +65,7 @@ func newSession(ctx context.Context, c *wireConn, db core.Session) *session {
 		db:       db,
 		prepared: map[string]*prepared{},
 		portals:  map[string]*portal{},
+		seqCurr:  map[string]int64{},
 	}
 }
 
@@ -239,8 +249,12 @@ func (s *session) handleParse(body []byte) error {
 		s.prepared[name] = &prepared{util: rs}
 		return s.c.send(msgParseComplete, nil)
 	}
+	if isSequenceDDL(raw) {
+		s.prepared[name] = &prepared{seqDDL: raw}
+		return s.c.send(msgParseComplete, nil)
+	}
 	sql := rewrite(raw)
-	s.prepared[name] = &prepared{sql: sql, numParams: countParams(sql)}
+	s.prepared[name] = &prepared{sql: sql, raw: raw, numParams: countParams(sql)}
 	return s.c.send(msgParseComplete, nil)
 }
 
@@ -300,7 +314,7 @@ func (s *session) handleDescribe(body []byte) error {
 		if prep == nil {
 			return s.protoError("26000", "unknown prepared statement "+quoteName(name))
 		}
-		if prep.util != nil || prep.txControl != "" {
+		if prep.util != nil || prep.txControl != "" || prep.seqDDL != "" {
 			if err := s.c.sendParameterDescription(0); err != nil {
 				return err
 			}
@@ -318,7 +332,7 @@ func (s *session) handleDescribe(body []byte) error {
 			return s.protoError("34000", "unknown portal "+quoteName(name))
 		}
 		prep = pt.prep
-		if prep.util != nil || prep.txControl != "" {
+		if prep.util != nil || prep.txControl != "" || prep.seqDDL != "" {
 			return s.sendUtilDescribe(prep.util)
 		}
 		args = pt.params
@@ -326,7 +340,13 @@ func (s *session) handleDescribe(body []byte) error {
 		return s.protoError("08P01", "invalid Describe target")
 	}
 
-	cols, err := s.describeSQL(prep.sql, args)
+	descSQL := prep.sql
+	if hasSeqFunc(prep.raw) {
+		// Describe must parse for column types but never advance a sequence;
+		// neutralize the calls to a constant, then rewrite the safe string.
+		descSQL = rewrite(neutralizeSequences(prep.raw))
+	}
+	cols, err := s.describeSQL(descSQL, args)
 	if err != nil {
 		logQueryError("describe", err, prep.sql, prep.sql)
 		return s.protoError("42000", err.Error())
@@ -368,6 +388,17 @@ func (s *session) handleExecute(body []byte) error {
 			"current transaction is aborted, commands ignored until end of transaction block")
 	}
 
+	if pt.prep.seqDDL != "" {
+		tag, _, err := s.trySequenceDDL(pt.prep.seqDDL)
+		if err != nil {
+			if s.tx != nil {
+				s.txFailed = true
+			}
+			return s.protoError("42000", err.Error())
+		}
+		return s.c.sendCommandComplete(tag)
+	}
+
 	if u := pt.prep.util; u != nil {
 		if u.IsQuery {
 			oids := make([]uint32, len(u.Columns))
@@ -381,9 +412,21 @@ func (s *session) handleExecute(body []byte) error {
 		return s.c.sendCommandComplete(commandTag(u))
 	}
 
-	rs, err := s.exec(pt.prep.sql, pt.params)
+	execSQL := pt.prep.sql
+	if hasSeqFunc(pt.prep.raw) {
+		// Expand on the raw statement, then rewrite (see handleSimpleQuery).
+		expanded, err := s.expandSequences(pt.prep.raw)
+		if err != nil {
+			if s.tx != nil {
+				s.txFailed = true
+			}
+			return s.protoError("42P01", err.Error())
+		}
+		execSQL = rewrite(expanded)
+	}
+	rs, err := s.exec(execSQL, pt.params)
 	if err != nil {
-		logQueryError("execute", err, pt.prep.sql, pt.prep.sql)
+		logQueryError("execute", err, execSQL, pt.prep.sql)
 		if s.tx != nil {
 			s.txFailed = true
 		}

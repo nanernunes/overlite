@@ -64,6 +64,11 @@ func metaCatalogViews() []string {
 		 -1 AS rolconnlimit, '********' AS rolpassword, NULL AS rolvaliduntil,
 		 rolbypassrls, NULL AS rolconfig
 		 FROM _overlite_roles`,
+		`CREATE TEMP VIEW pg_sequences AS SELECT 'public' AS schemaname, seqname AS sequencename,
+		 ` + sqlQuote(catalogRole) + ` AS sequenceowner, 'bigint' AS data_type,
+		 start_value, min_value, max_value, increment AS increment_by, is_cycled AS cycle,
+		 cache_size, CASE WHEN is_called THEN last_value ELSE NULL END AS last_value
+		 FROM _overlite_sequences`,
 		`CREATE TEMP VIEW pg_database AS SELECT 1 AS oid, ` + sqlQuote(catalogDBName) + ` AS datname,
 		 10 AS datdba, 6 AS encoding, 'c' AS datlocprovider, 'C' AS datcollate, 'C' AS datctype,
 		 NULL AS daticulocale, NULL AS daticurules, NULL AS datcollversion,
@@ -156,6 +161,10 @@ func setupConnection(ctx context.Context, exec func(string) error, query func(st
 		return err
 	}
 	if err := exec(seedDefaultRoleSQL()); err != nil {
+		return err
+	}
+	// The internal sequences table (nextval/currval/... read and write it).
+	if err := exec(sequencesTableDDL); err != nil {
 		return err
 	}
 
