@@ -381,7 +381,7 @@ var jsonFuncMap = map[string]string{
 	"json_agg": "json_group_array", "jsonb_agg": "json_group_array",
 	"json_typeof": "json_type", "jsonb_typeof": "json_type",
 	"jsonb_array_length": "json_array_length",
-	"to_json": "json_quote", "to_jsonb": "json_quote",
+	"to_json":            "json_quote", "to_jsonb": "json_quote",
 	"jsonb_pretty": "json", "jsonb_set": "json_set", "jsonb_insert": "json_insert",
 }
 

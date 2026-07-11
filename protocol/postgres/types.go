@@ -66,7 +66,7 @@ var boolCatalogColumns = map[string]bool{
 	"condeferrable": true, "condeferred": true,
 	"rolsuper": true, "rolinherit": true, "rolcreaterole": true,
 	"rolcreatedb": true, "rolcanlogin": true, "rolreplication": true,
-	"rolbypassrls": true,
+	"rolbypassrls":  true,
 	"datistemplate": true, "datallowconn": true,
 }
 

@@ -39,8 +39,8 @@ func TestRewritePgCatalogPrefix(t *testing.T) {
 		"SELECT * FROM pg_catalog.pg_class":       "SELECT * FROM pg_class",
 		"SELECT pg_catalog.version()":             "SELECT version()",
 		"JOIN pg_catalog.pg_namespace n ON n.oid": "JOIN pg_namespace n ON n.oid",
-		"SELECT 1":                                "SELECT 1",
-		"SELECT PG_CATALOG.PG_CLASS":              "SELECT PG_CLASS", // case-insensitive
+		"SELECT 1":                   "SELECT 1",
+		"SELECT PG_CATALOG.PG_CLASS": "SELECT PG_CLASS", // case-insensitive
 	}
 	for in, want := range cases {
 		assert.Equalf(t, want, rewritePgCatalogPrefix(in), "rewritePgCatalogPrefix(%q)", in)
@@ -49,15 +49,15 @@ func TestRewritePgCatalogPrefix(t *testing.T) {
 
 func TestRewriteJSONFuncs(t *testing.T) {
 	cases := map[string]string{
-		"SELECT jsonb_build_object('a', 1)":   "SELECT json_object('a', 1)",
-		"SELECT json_build_array(1, 2)":       "SELECT json_array(1, 2)",
-		"SELECT jsonb_agg(x)":                 "SELECT json_group_array(x)",
-		"SELECT jsonb_object_agg(k, v)":       "SELECT json_group_object(k, v)",
-		"SELECT jsonb_typeof(doc)":            "SELECT json_type(doc)",
-		"SELECT jsonb_array_length(doc)":      "SELECT json_array_length(doc)",
-		"SELECT to_jsonb(x)":                  "SELECT json_quote(x)",
-		"SELECT json_extract(doc, '$.a')":     "SELECT json_extract(doc, '$.a')", // native, untouched
-		"SELECT doc -> 'k', doc ->> 'k'":      "SELECT doc -> 'k', doc ->> 'k'",  // native operators
+		"SELECT jsonb_build_object('a', 1)": "SELECT json_object('a', 1)",
+		"SELECT json_build_array(1, 2)":     "SELECT json_array(1, 2)",
+		"SELECT jsonb_agg(x)":               "SELECT json_group_array(x)",
+		"SELECT jsonb_object_agg(k, v)":     "SELECT json_group_object(k, v)",
+		"SELECT jsonb_typeof(doc)":          "SELECT json_type(doc)",
+		"SELECT jsonb_array_length(doc)":    "SELECT json_array_length(doc)",
+		"SELECT to_jsonb(x)":                "SELECT json_quote(x)",
+		"SELECT json_extract(doc, '$.a')":   "SELECT json_extract(doc, '$.a')", // native, untouched
+		"SELECT doc -> 'k', doc ->> 'k'":    "SELECT doc -> 'k', doc ->> 'k'",  // native operators
 	}
 	for in, want := range cases {
 		assert.Equalf(t, want, rewriteJSONFuncs(in), "rewriteJSONFuncs(%q)", in)
@@ -106,11 +106,11 @@ func TestRewriteExtract(t *testing.T) {
 
 func TestRewriteSerial(t *testing.T) {
 	cases := map[string]string{
-		"CREATE TABLE t (id SERIAL PRIMARY KEY, n TEXT)":  "CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, n TEXT)",
-		"CREATE TABLE t (id BIGSERIAL PRIMARY KEY)":       "CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT)",
-		"CREATE TABLE t (a SERIAL, b INT)":                "CREATE TABLE t (a INTEGER, b INT)",
-		"ALTER TABLE t ADD COLUMN c SMALLSERIAL":          "ALTER TABLE t ADD COLUMN c INTEGER",
-		"SELECT serial FROM t":                            "SELECT serial FROM t", // not DDL → untouched
+		"CREATE TABLE t (id SERIAL PRIMARY KEY, n TEXT)": "CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, n TEXT)",
+		"CREATE TABLE t (id BIGSERIAL PRIMARY KEY)":      "CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT)",
+		"CREATE TABLE t (a SERIAL, b INT)":               "CREATE TABLE t (a INTEGER, b INT)",
+		"ALTER TABLE t ADD COLUMN c SMALLSERIAL":         "ALTER TABLE t ADD COLUMN c INTEGER",
+		"SELECT serial FROM t":                           "SELECT serial FROM t", // not DDL → untouched
 	}
 	for in, want := range cases {
 		assert.Equalf(t, want, rewriteSerial(in), "rewriteSerial(%q)", in)
@@ -119,13 +119,13 @@ func TestRewriteSerial(t *testing.T) {
 
 func TestRewriteNiladicFuncs(t *testing.T) {
 	cases := map[string]string{
-		"SELECT current_user":                   "SELECT current_user()",
-		"SELECT current_schema, current_user":   "SELECT current_schema(), current_user()",
-		"SELECT current_user()":                 "SELECT current_user()",       // already a call
-		`SELECT x AS "current_user"`:            `SELECT x AS "current_user"`,   // quoted identifier
-		"SELECT n.current_user":                 "SELECT n.current_user",        // qualified
-		"SELECT 'current_user'":                 "SELECT 'current_user'",        // string literal
-		"WHERE rolname = current_user AND a=1":  "WHERE rolname = current_user() AND a=1",
+		"SELECT current_user":                  "SELECT current_user()",
+		"SELECT current_schema, current_user":  "SELECT current_schema(), current_user()",
+		"SELECT current_user()":                "SELECT current_user()",      // already a call
+		`SELECT x AS "current_user"`:           `SELECT x AS "current_user"`, // quoted identifier
+		"SELECT n.current_user":                "SELECT n.current_user",      // qualified
+		"SELECT 'current_user'":                "SELECT 'current_user'",      // string literal
+		"WHERE rolname = current_user AND a=1": "WHERE rolname = current_user() AND a=1",
 	}
 	for in, want := range cases {
 		assert.Equalf(t, want, rewriteNiladicFuncs(in), "rewriteNiladicFuncs(%q)", in)
@@ -140,11 +140,11 @@ func TestRewriteEscapeStrings(t *testing.T) {
 
 func TestRewritePublicPrefix(t *testing.T) {
 	cases := map[string]string{
-		"SELECT * FROM public.clientes":       "SELECT * FROM clientes",
-		`SELECT * FROM "public"."clientes"`:   `SELECT * FROM "clientes"`,
-		"SELECT * FROM PUBLIC.clientes":       "SELECT * FROM clientes",
-		"SELECT * FROM t WHERE x = 'public'":  "SELECT * FROM t WHERE x = 'public'", // string untouched
-		"SELECT * FROM mypublic.t":            "SELECT * FROM mypublic.t",           // not a word match
+		"SELECT * FROM public.clientes":      "SELECT * FROM clientes",
+		`SELECT * FROM "public"."clientes"`:  `SELECT * FROM "clientes"`,
+		"SELECT * FROM PUBLIC.clientes":      "SELECT * FROM clientes",
+		"SELECT * FROM t WHERE x = 'public'": "SELECT * FROM t WHERE x = 'public'", // string untouched
+		"SELECT * FROM mypublic.t":           "SELECT * FROM mypublic.t",           // not a word match
 	}
 	for in, want := range cases {
 		assert.Equalf(t, want, rewritePublicPrefix(in), "rewritePublicPrefix(%q)", in)
@@ -153,14 +153,14 @@ func TestRewritePublicPrefix(t *testing.T) {
 
 func TestRewriteMatchOperators(t *testing.T) {
 	cases := map[string]string{
-		"a ~ 'x'":                  "a REGEXP 'x'",
-		"a !~ 'x'":                 "NOT (a REGEXP 'x')",
-		"nspname !~ '^pg_toast'":   "NOT (nspname REGEXP '^pg_toast')",
-		"n.nspname ~ 'pub'":        "n.nspname REGEXP 'pub'",
-		"a ~* 'x'":                 "a REGEXP '(?i)x'",
-		"a !~* 'x'":                "NOT (a REGEXP '(?i)x')",
-		"WHERE a = 1":              "WHERE a = 1", // untouched
-		"a !~ 'p' AND b ~ 'q'":     "NOT (a REGEXP 'p') AND b REGEXP 'q'",
+		"a ~ 'x'":                "a REGEXP 'x'",
+		"a !~ 'x'":               "NOT (a REGEXP 'x')",
+		"nspname !~ '^pg_toast'": "NOT (nspname REGEXP '^pg_toast')",
+		"n.nspname ~ 'pub'":      "n.nspname REGEXP 'pub'",
+		"a ~* 'x'":               "a REGEXP '(?i)x'",
+		"a !~* 'x'":              "NOT (a REGEXP '(?i)x')",
+		"WHERE a = 1":            "WHERE a = 1", // untouched
+		"a !~ 'p' AND b ~ 'q'":   "NOT (a REGEXP 'p') AND b REGEXP 'q'",
 	}
 	for in, want := range cases {
 		assert.Equalf(t, want, rewriteMatchOperators(in), "rewriteMatchOperators(%q)", in)
@@ -222,12 +222,12 @@ func TestRewriteArrayAndAny(t *testing.T) {
 
 func TestRewriteTrimFrom(t *testing.T) {
 	cases := map[string]string{
-		"trim(trailing ';' from x)":                    "rtrim(x, ';')",
-		"trim(leading ' ' from name)":                  "ltrim(name, ' ')",
+		"trim(trailing ';' from x)":                     "rtrim(x, ';')",
+		"trim(leading ' ' from name)":                   "ltrim(name, ' ')",
 		"trim(both '-' from a)":                         "trim(a, '-')",
 		"trim(trailing ';' from pg_get_ruledef(r.oid))": "rtrim(pg_get_ruledef(r.oid), ';')",
-		"trim(x)":                                       "trim(x)", // ordinary trim untouched
-		"SELECT trim(both '.' from a), b FROM t":        "SELECT trim(a, '.'), b FROM t",
+		"trim(x)":                                "trim(x)", // ordinary trim untouched
+		"SELECT trim(both '.' from a), b FROM t": "SELECT trim(a, '.'), b FROM t",
 	}
 	for in, want := range cases {
 		assert.Equalf(t, want, rewriteTrimFrom(in), "rewriteTrimFrom(%q)", in)

@@ -13,27 +13,27 @@ import (
 // message-format docs; startup messages carry no type byte.
 const (
 	// Frontend messages.
-	msgQuery     = 'Q' // simple query
-	msgParse     = 'P' // extended: parse a statement
-	msgBind      = 'B' // extended: bind a portal
-	msgDescribe  = 'D' // extended: describe statement/portal
-	msgExecute   = 'E' // extended: execute a portal
-	msgSync      = 'S' // extended: end of a request cycle
-	msgFlush     = 'H' // extended: flush pending output
+	msgQuery           = 'Q' // simple query
+	msgParse           = 'P' // extended: parse a statement
+	msgBind            = 'B' // extended: bind a portal
+	msgDescribe        = 'D' // extended: describe statement/portal
+	msgExecute         = 'E' // extended: execute a portal
+	msgSync            = 'S' // extended: end of a request cycle
+	msgFlush           = 'H' // extended: flush pending output
 	msgClose           = 'C' // extended: close statement/portal
 	msgPasswordMessage = 'p' // password response
 	msgTerminate       = 'X' // frontend closing
 
 	// Backend messages.
-	msgAuthentication      = 'R'
-	msgParameterStatus     = 'S'
-	msgBackendKeyData      = 'K'
-	msgReadyForQuery       = 'Z'
-	msgRowDescription      = 'T'
-	msgDataRow             = 'D'
-	msgCommandComplete     = 'C'
-	msgEmptyQuery          = 'I'
-	msgErrorResponse       = 'E'
+	msgAuthentication       = 'R'
+	msgParameterStatus      = 'S'
+	msgBackendKeyData       = 'K'
+	msgReadyForQuery        = 'Z'
+	msgRowDescription       = 'T'
+	msgDataRow              = 'D'
+	msgCommandComplete      = 'C'
+	msgEmptyQuery           = 'I'
+	msgErrorResponse        = 'E'
 	msgParseComplete        = '1'
 	msgBindComplete         = '2'
 	msgCloseComplete        = '3'
