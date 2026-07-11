@@ -45,7 +45,56 @@ func dynamicCatalogViews(refs []schemaRef) []string {
 		union("pg_trigger", refs, pgTriggerTmpl),
 		union(`"information_schema.tables"`, refs, infoTablesTmpl),
 		union(`"information_schema.columns"`, refs, infoColumnsTmpl),
+		union(`"information_schema.table_constraints"`, refs, infoTableConstraintsTmpl),
+		union(`"information_schema.key_column_usage"`, refs, infoKeyColumnUsageTmpl),
+		union(`"information_schema.referential_constraints"`, refs, infoReferentialConstraintsTmpl),
+		union(`"information_schema.constraint_column_usage"`, refs, infoConstraintColumnUsageTmpl),
+		union(`"information_schema.views"`, refs, infoViewsTmpl),
+		infoSchemataView(refs),
+		infoSequencesView(),
+		infoCheckConstraintsView(),
+		infoRoutinesView(),
 	}
+}
+
+// infoSchemataView lists every schema (system + user) as information_schema.schemata.
+func infoSchemataView(refs []schemaRef) string {
+	v := `CREATE TEMP VIEW "information_schema.schemata" AS` +
+		` SELECT ` + sqlQuote(catalogDBName) + ` AS catalog_name, 'information_schema' AS schema_name, ` +
+		sqlQuote(catalogRole) + ` AS schema_owner` +
+		` UNION ALL SELECT ` + sqlQuote(catalogDBName) + `,'pg_catalog',` + sqlQuote(catalogRole)
+	for _, r := range refs {
+		v += ` UNION ALL SELECT ` + sqlQuote(catalogDBName) + `,'` + r.PgName + `',` + sqlQuote(catalogRole)
+	}
+	return v
+}
+
+// infoSequencesView exposes the internal sequence table as information_schema.sequences.
+func infoSequencesView() string {
+	return `CREATE TEMP VIEW "information_schema.sequences" AS
+	 SELECT ` + sqlQuote(catalogDBName) + ` AS sequence_catalog, 'public' AS sequence_schema,
+	        seqname AS sequence_name, 'bigint' AS data_type, 64 AS numeric_precision,
+	        2 AS numeric_precision_radix, 0 AS numeric_scale,
+	        CAST(start_value AS TEXT) AS start_value, CAST(min_value AS TEXT) AS minimum_value,
+	        CAST(max_value AS TEXT) AS maximum_value, CAST(increment AS TEXT) AS increment,
+	        CASE is_cycled WHEN 1 THEN 'YES' ELSE 'NO' END AS cycle_option
+	 FROM _overlite_sequences`
+}
+
+// infoCheckConstraintsView / infoRoutinesView are present but empty (we don't
+// enumerate CHECK clauses or model routines yet).
+func infoCheckConstraintsView() string {
+	return `CREATE TEMP VIEW "information_schema.check_constraints" AS
+	 SELECT ` + sqlQuote(catalogDBName) + ` AS constraint_catalog, 'public' AS constraint_schema,
+	        '' AS constraint_name, '' AS check_clause WHERE 0`
+}
+
+func infoRoutinesView() string {
+	return `CREATE TEMP VIEW "information_schema.routines" AS
+	 SELECT ` + sqlQuote(catalogDBName) + ` AS specific_catalog, 'public' AS specific_schema,
+	        '' AS specific_name, ` + sqlQuote(catalogDBName) + ` AS routine_catalog,
+	        'public' AS routine_schema, '' AS routine_name, 'FUNCTION' AS routine_type,
+	        '' AS data_type, '' AS routine_definition WHERE 0`
 }
 
 // pgTriggerTmpl exposes each schema's SQLite triggers (sqlite_master type
@@ -163,7 +212,82 @@ const infoTablesTmpl = `SELECT 'main' AS table_catalog, '@PG@' AS table_schema, 
 FROM @DB@.sqlite_master WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%' AND name NOT GLOB '_overlite_*'`
 
 const infoColumnsTmpl = `SELECT 'main' AS table_catalog, '@PG@' AS table_schema, m.name AS table_name,
- ti.name AS column_name, ti.cid + 1 AS ordinal_position, ti.type AS data_type,
- CASE ti."notnull" WHEN 1 THEN 'NO' ELSE 'YES' END AS is_nullable
+ ti.name AS column_name, ti.cid + 1 AS ordinal_position, ti.dflt_value AS column_default,
+ CASE WHEN ti."notnull"=1 OR ti.pk>0 THEN 'NO' ELSE 'YES' END AS is_nullable,
+ format_type(overlite_type_oid(ti.type), NULL) AS data_type,
+ NULL AS character_maximum_length, NULL AS character_octet_length,
+ NULL AS numeric_precision, NULL AS numeric_precision_radix, NULL AS numeric_scale,
+ NULL AS datetime_precision,
+ 'main' AS udt_catalog, 'pg_catalog' AS udt_schema,
+ format_type(overlite_type_oid(ti.type), NULL) AS udt_name,
+ NULL AS collation_name, NULL AS domain_catalog, NULL AS domain_schema, NULL AS domain_name,
+ ti.cid + 1 AS dtd_identifier, 'NO' AS is_identity, 'NO' AS is_generated,
+ 'NEVER' AS identity_generation, 'YES' AS is_updatable
 FROM @DB@.sqlite_master m JOIN pragma_table_info(m.name,'@DB@') ti
 WHERE m.type='table' AND m.name NOT LIKE 'sqlite_%' AND m.name NOT GLOB '_overlite_*'`
+
+// The constraint-family views are derived from SQLite pragmas. Constraint names
+// match pg_constraint: "<table>_pkey" for the primary key, "fk_<table>_<id>" for
+// a foreign key, and the index name for a UNIQUE constraint.
+
+const infoTableConstraintsTmpl = `SELECT 'main' AS constraint_catalog, '@PG@' AS constraint_schema,
+ tbl.name || '_pkey' AS constraint_name, 'main' AS table_catalog, '@PG@' AS table_schema,
+ tbl.name AS table_name, 'PRIMARY KEY' AS constraint_type, 'NO' AS is_deferrable,
+ 'NO' AS initially_deferred, 'YES' AS enforced
+FROM @DB@.sqlite_master tbl
+WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%' AND tbl.name NOT GLOB '_overlite_*'
+  AND EXISTS(SELECT 1 FROM pragma_table_info(tbl.name,'@DB@') WHERE pk>0)
+UNION ALL
+SELECT 'main', '@PG@', 'fk_' || tbl.name || '_' || fk.id, 'main', '@PG@', tbl.name,
+ 'FOREIGN KEY', 'NO', 'NO', 'YES'
+FROM @DB@.sqlite_master tbl JOIN pragma_foreign_key_list(tbl.name,'@DB@') fk
+WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%' AND tbl.name NOT GLOB '_overlite_*' AND fk.seq=0
+UNION ALL
+SELECT 'main', '@PG@',
+ tbl.name || '_' || (SELECT x.name FROM pragma_index_info(il.name,'@DB@') x WHERE x.seqno=0) || '_key',
+ 'main', '@PG@', tbl.name, 'UNIQUE', 'NO', 'NO', 'YES'
+FROM @DB@.sqlite_master tbl JOIN pragma_index_list(tbl.name,'@DB@') il
+WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%' AND tbl.name NOT GLOB '_overlite_*'
+  AND il.origin='u' AND il."unique"=1`
+
+const infoKeyColumnUsageTmpl = `SELECT 'main' AS constraint_catalog, '@PG@' AS constraint_schema,
+ tbl.name || '_pkey' AS constraint_name, 'main' AS table_catalog, '@PG@' AS table_schema,
+ tbl.name AS table_name, ti.name AS column_name, ti.pk AS ordinal_position,
+ NULL AS position_in_unique_constraint
+FROM @DB@.sqlite_master tbl JOIN pragma_table_info(tbl.name,'@DB@') ti
+WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%' AND tbl.name NOT GLOB '_overlite_*' AND ti.pk>0
+UNION ALL
+SELECT 'main', '@PG@', 'fk_' || tbl.name || '_' || fk.id, 'main', '@PG@', tbl.name,
+ fk."from", fk.seq+1, fk.seq+1
+FROM @DB@.sqlite_master tbl JOIN pragma_foreign_key_list(tbl.name,'@DB@') fk
+WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%' AND tbl.name NOT GLOB '_overlite_*'
+UNION ALL
+SELECT 'main', '@PG@',
+ tbl.name || '_' || (SELECT x.name FROM pragma_index_info(il.name,'@DB@') x WHERE x.seqno=0) || '_key',
+ 'main', '@PG@', tbl.name, ii.name, ii.seqno+1, NULL
+FROM @DB@.sqlite_master tbl JOIN pragma_index_list(tbl.name,'@DB@') il
+ JOIN pragma_index_info(il.name,'@DB@') ii
+WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%' AND tbl.name NOT GLOB '_overlite_*'
+  AND il.origin='u' AND il."unique"=1`
+
+const infoReferentialConstraintsTmpl = `SELECT 'main' AS constraint_catalog, '@PG@' AS constraint_schema,
+ 'fk_' || tbl.name || '_' || fk.id AS constraint_name, 'main' AS unique_constraint_catalog,
+ '@PG@' AS unique_constraint_schema, fk."table" || '_pkey' AS unique_constraint_name,
+ 'NONE' AS match_option, fk.on_update AS update_rule, fk.on_delete AS delete_rule
+FROM @DB@.sqlite_master tbl JOIN pragma_foreign_key_list(tbl.name,'@DB@') fk
+WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%' AND tbl.name NOT GLOB '_overlite_*' AND fk.seq=0`
+
+const infoConstraintColumnUsageTmpl = `SELECT 'main' AS table_catalog, '@PG@' AS table_schema,
+ tbl.name AS table_name, ti.name AS column_name, 'main' AS constraint_catalog,
+ '@PG@' AS constraint_schema, tbl.name || '_pkey' AS constraint_name
+FROM @DB@.sqlite_master tbl JOIN pragma_table_info(tbl.name,'@DB@') ti
+WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%' AND tbl.name NOT GLOB '_overlite_*' AND ti.pk>0
+UNION ALL
+SELECT 'main', '@PG@', fk."table", fk."to", 'main', '@PG@', 'fk_' || tbl.name || '_' || fk.id
+FROM @DB@.sqlite_master tbl JOIN pragma_foreign_key_list(tbl.name,'@DB@') fk
+WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%' AND tbl.name NOT GLOB '_overlite_*'`
+
+const infoViewsTmpl = `SELECT 'main' AS table_catalog, '@PG@' AS table_schema, name AS table_name,
+ sql AS view_definition, 'NONE' AS check_option, 'NO' AS is_updatable, 'NO' AS is_insertable_into,
+ 'NO' AS is_trigger_updatable, 'NO' AS is_trigger_deletable, 'NO' AS is_trigger_insertable_into
+FROM @DB@.sqlite_master WHERE type='view' AND name NOT LIKE 'sqlite_%' AND name NOT GLOB '_overlite_*'`

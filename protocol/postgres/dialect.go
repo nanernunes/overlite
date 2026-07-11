@@ -681,7 +681,9 @@ func rewriteNiladicFuncs(sql string) string {
 
 // reInfoSchema matches references to the emulated information_schema so they
 // resolve to the quoted, dotted view names the engine materializes.
-var reInfoSchema = regexp.MustCompile(`(?i)\binformation_schema\.(tables|columns)\b`)
+var reInfoSchema = regexp.MustCompile(`(?i)\binformation_schema\.(tables|columns|table_constraints|` +
+	`key_column_usage|referential_constraints|constraint_column_usage|check_constraints|views|` +
+	`schemata|sequences|routines)\b`)
 
 func rewriteInformationSchema(sql string) string {
 	return mapOutsideStrings(sql, func(code string) string {
