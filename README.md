@@ -96,7 +96,7 @@ for a real production system**. ✅ done · 🟡 partial · ⬜ not yet.
 | Migrations (`ALTER TABLE`) | 🟡 | add/drop/rename column; no `ALTER COLUMN TYPE` / `ADD CONSTRAINT` |
 | Numeric precision | 🟡 | SQLite affinity; not exact fixed-point (money) |
 | Timestamps with time zone | 🟡 | stored as text; no real `timestamptz` / tz math |
-| Backup / restore | 🟡 | `\copy` works; `pg_dump` dumps data but not full schema |
+| Backup / restore | ✅ | `\copy` and `pg_dump` (schema + data: types, constraints, sequences) |
 | Roles & permissions | 🟡 | `CREATE`/`ALTER`/`DROP ROLE`/`USER` in `\du`; `GRANT`/`REVOKE` accepted as no-ops; no enforcement or row-level security |
 | Server-side logic | ⬜ | PL/pgSQL functions & procedures (triggers only in SQLite syntax) |
 | Sequences | ✅ | `CREATE`/`ALTER`/`DROP SEQUENCE`, `nextval`/`currval`/`setval`/`lastval`, `\ds`; `DEFAULT nextval()` in DDL not supported (use `SERIAL`) |

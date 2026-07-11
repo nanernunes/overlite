@@ -150,6 +150,9 @@ func pgClassView(refs []schemaRef) string {
 		parts = append(parts, frag(pgClassTmpl, r))
 	}
 	for _, r := range refs {
+		parts = append(parts, frag(pgUniqueIndexClassTmpl, r))
+	}
+	for _, r := range refs {
 		if r.DB == "main" {
 			parts = append(parts, frag(pgSequenceClassTmpl, r))
 		}
@@ -158,6 +161,19 @@ func pgClassView(refs []schemaRef) string {
 		" 0 AS relfrozenxid, 0 AS relhasoids, NULL AS relpartbound2, 0 AS relallfrozen FROM (\n" +
 		strings.Join(parts, "\nUNION ALL\n") + "\n) _c"
 }
+
+// pgUniqueIndexClassTmpl adds a pg_class row (relkind 'i') for each UNIQUE
+// constraint's SQLite auto-index (which lives in pragma_index_list, not
+// sqlite_master), so pg_dump can resolve the constraint's backing index.
+const pgUniqueIndexClassTmpl = `SELECT CAST(tbl.rowid*1000 + il.seq + 84000000 + @OFF@ AS INTEGER) AS oid,
+ tbl.name || '_' || (SELECT ii.name FROM pragma_index_info(il.name,'@DB@') ii WHERE ii.seqno=0) || '_key' AS relname,
+ @NS@ AS relnamespace,
+ 0,0,10,403,0,0,0,0,0,0,
+ 0, 0, 'p', 'i',
+ (SELECT count(*) FROM pragma_index_info(il.name,'@DB@')), 0,0,0,0,0,0,1,'n',0,NULL,NULL,NULL,0,0
+FROM @DB@.sqlite_master tbl JOIN pragma_index_list(tbl.name,'@DB@') il
+WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%' AND tbl.name NOT GLOB '_overlite_*'
+  AND il.origin='u' AND il."unique"=1`
 
 // pgSequenceClassTmpl adds one pg_class row per sequence (column order matches
 // pgClassTmpl; names come from the first SELECT in the UNION).
@@ -232,7 +248,18 @@ SELECT tbl.rowid + 90000000 + @OFF@, tbl.rowid + @OFF@,
  (SELECT group_concat(name,', ') FROM pragma_table_info(tbl.name,'@DB@') WHERE pk>0 ORDER BY pk)
 FROM @DB@.sqlite_master tbl
 WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%' AND tbl.name NOT GLOB '_overlite_*'
-  AND EXISTS(SELECT 1 FROM pragma_table_info(tbl.name,'@DB@') WHERE pk>0)`
+  AND EXISTS(SELECT 1 FROM pragma_table_info(tbl.name,'@DB@') WHERE pk>0)
+UNION ALL
+SELECT CAST(tbl.rowid*1000 + il.seq + 84000000 + @OFF@ AS INTEGER), tbl.rowid + @OFF@,
+ (SELECT count(*) FROM pragma_index_info(il.name,'@DB@')),
+ (SELECT count(*) FROM pragma_index_info(il.name,'@DB@')),
+ 1,0,0,1,0,1,0,1,1,0,
+ (SELECT group_concat(ii.cid+1,' ') FROM pragma_index_info(il.name,'@DB@') ii),
+ '','','',NULL,NULL,
+ (SELECT group_concat(ii.name,', ') FROM pragma_index_info(il.name,'@DB@') ii)
+FROM @DB@.sqlite_master tbl JOIN pragma_index_list(tbl.name,'@DB@') il
+WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%' AND tbl.name NOT GLOB '_overlite_*'
+  AND il.origin='u' AND il."unique"=1`
 
 const pgConstraintTmpl = `SELECT tbl.rowid*100000 + fk.id + @OFF@ AS oid, 'fk_' || tbl.name || '_' || fk.id AS conname,
  @NS@ AS connamespace, 'f' AS contype, 0 AS condeferrable, 0 AS condeferred, 1 AS convalidated,
@@ -250,7 +277,16 @@ SELECT tbl.rowid*100000 + 99999 + @OFF@, tbl.name || '_pkey', @NS@, 'p', 0,0,1,
  (SELECT group_concat(name,', ') FROM pragma_table_info(tbl.name,'@DB@') WHERE pk>0 ORDER BY pk), NULL
 FROM @DB@.sqlite_master tbl
 WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%' AND tbl.name NOT GLOB '_overlite_*'
-  AND EXISTS(SELECT 1 FROM pragma_table_info(tbl.name,'@DB@') WHERE pk>0)`
+  AND EXISTS(SELECT 1 FROM pragma_table_info(tbl.name,'@DB@') WHERE pk>0)
+UNION ALL
+SELECT tbl.rowid*100000 + 88000 + il.seq + @OFF@,
+ tbl.name || '_' || (SELECT ii.name FROM pragma_index_info(il.name,'@DB@') ii WHERE ii.seqno=0) || '_key', @NS@, 'u', 0,0,1,
+ CAST(tbl.rowid + @OFF@ AS INTEGER), 0, CAST(tbl.rowid*1000 + il.seq + 84000000 + @OFF@ AS INTEGER), 0, 0,
+ ' ',' ',' ', 1,0,1, '','',NULL,
+ (SELECT group_concat(ii.name,', ') FROM pragma_index_info(il.name,'@DB@') ii), NULL
+FROM @DB@.sqlite_master tbl JOIN pragma_index_list(tbl.name,'@DB@') il
+WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%' AND tbl.name NOT GLOB '_overlite_*'
+  AND il.origin='u' AND il."unique"=1`
 
 const infoTablesTmpl = `SELECT 'main' AS table_catalog, '@PG@' AS table_schema, name AS table_name,
  CASE type WHEN 'view' THEN 'VIEW' ELSE 'BASE TABLE' END AS table_type
