@@ -394,16 +394,17 @@ func (s *session) injectRLSWhere(sql, command string) string {
 	return body + semi
 }
 
-// tryRLSInsert enforces WITH CHECK on INSERT … VALUES for a subject role. It
-// counts how many of the new rows satisfy the policy versus how many were given
-// (binding the same params, so parameterized inserts are covered) and, if any
-// row fails, rejects the statement before the real INSERT runs.
+// tryRLSInsert enforces WITH CHECK on INSERT (both VALUES and SELECT sources)
+// for a subject role. It counts how many of the new rows satisfy the policy
+// versus how many the source produces (binding the same params, so
+// parameterized inserts are covered) and, if any row fails, rejects the
+// statement before the real INSERT runs.
 func (s *session) tryRLSInsert(sql string, params []core.Value) (bool, *core.ResultSet, error) {
 	if firstWordUpper(sql) != "INSERT" {
 		return false, nil, nil
 	}
-	target, cols, valuesIdx := parseInsert(sql)
-	if target == "" {
+	target, cols, srcStart := parseInsert(sql)
+	if target == "" || srcStart < 0 {
 		return false, nil, nil
 	}
 	bare := bareTableName(target)
@@ -411,10 +412,16 @@ func (s *session) tryRLSInsert(sql string, params []core.Value) (bool, *core.Res
 	if !subject {
 		return false, nil, nil
 	}
-	low := strings.ToLower(sql)
-	// Forms we don't rewrite for the check: enforce default-deny, else allow.
-	// (A trailing RETURNING is fine — it's stripped from the value list below.)
-	if valuesIdx < 0 || strings.Contains(low, "on conflict") {
+	// The row source is everything after the target/column-list — VALUES (…) or
+	// SELECT …, both valid as a CTE body — minus any trailing RETURNING.
+	source := strings.TrimRight(sql[srcStart:], "; \t\n")
+	if ri := topLevelKeyword(source, "returning"); ri >= 0 {
+		source = source[:ri]
+	}
+	srcLow := strings.ToLower(strings.TrimSpace(source))
+	// Forms we can't turn into a row-count check: enforce default-deny, else allow.
+	if strings.Contains(strings.ToLower(sql), "on conflict") ||
+		strings.HasPrefix(srcLow, "default") || strings.HasPrefix(srcLow, "overriding") {
 		if expr == "(0)" {
 			return true, nil, fmt.Errorf("new row violates row-level security policy for table %q", bare)
 		}
@@ -426,13 +433,8 @@ func (s *session) tryRLSInsert(sql string, params []core.Value) (bool, *core.Res
 	if len(cols) == 0 {
 		return false, nil, nil
 	}
-	after := sql[valuesIdx+len("values"):]
-	if ri := topLevelKeyword(after, "returning"); ri >= 0 {
-		after = after[:ri] // the VALUES tuples end before RETURNING
-	}
-	values := strings.TrimRight(after, "; \t\n")
 	collist := strings.Join(cols, ", ")
-	cte := "WITH _rls_src (" + collist + ") AS (VALUES " + values + ") "
+	cte := "WITH _rls_src (" + collist + ") AS (" + source + ") "
 
 	// The VALUES may carry the same $N placeholders as the original INSERT, so
 	// bind params to both counts.
@@ -452,25 +454,42 @@ func (s *session) tryRLSInsert(sql string, params []core.Value) (bool, *core.Res
 }
 
 // parseInsert extracts the target table token, an explicit column list (if any),
-// and the byte index of the top-level VALUES keyword (-1 if none).
-func parseInsert(sql string) (target string, cols []string, valuesIdx int) {
-	valuesIdx = topLevelKeyword(sql, "values")
+// and the byte index where the row source (VALUES/SELECT/…) begins (-1 if none).
+func parseInsert(sql string) (target string, cols []string, srcStart int) {
+	srcStart = -1
 	toks := rlsTokens(sql)
 	for i := 0; i < len(toks); i++ {
-		if toks[i].kind == 'w' && strings.EqualFold(toks[i].text, "into") && i+1 < len(toks) {
-			target = toks[i+1].text
-			// optional column list in parentheses before VALUES
-			if i+2 < len(toks) && toks[i+2].kind == '(' {
-				for j := i + 3; j < len(toks) && toks[j].kind != ')'; j++ {
-					if toks[j].kind == 'w' {
+		if toks[i].kind != 'w' || !strings.EqualFold(toks[i].text, "into") || i+1 >= len(toks) {
+			continue
+		}
+		target = toks[i+1].text
+		j := i + 2
+		// Optional column list in parentheses before the source query.
+		if j < len(toks) && toks[j].kind == '(' {
+			depth := 0
+			for ; j < len(toks); j++ {
+				switch toks[j].kind {
+				case '(':
+					depth++
+				case ')':
+					depth--
+				case 'w':
+					if depth == 1 {
 						cols = append(cols, toks[j].text)
 					}
 				}
+				if depth == 0 {
+					j++
+					break
+				}
 			}
-			break
 		}
+		if j < len(toks) {
+			srcStart = toks[j].start
+		}
+		break
 	}
-	return target, cols, valuesIdx
+	return target, cols, srcStart
 }
 
 func (s *session) tableColumns(table string) []string {

@@ -151,6 +151,36 @@ func TestRLSInsertReturning(t *testing.T) {
 	assert.Equal(t, 2, n)
 }
 
+// TestRLSInsertSelect: WITH CHECK is enforced on INSERT … SELECT — every row
+// the source produces must satisfy the policy.
+func TestRLSInsertSelect(t *testing.T) {
+	addr := rlsSetup(t)
+	ctx := context.Background()
+	admin := connectAs(t, addr, "postgres", "adminpw")
+	mustExec(t, admin, `CREATE TABLE incoming (id int, owner text, body text)`)
+	mustExec(t, admin, `INSERT INTO incoming VALUES (50,'alice','s'),(51,'bob','s')`)
+	mustExec(t, admin, `GRANT SELECT ON incoming TO alice`)
+
+	alice := connectAs(t, addr, "alice", "a")
+
+	// Source row she owns: accepted.
+	_, err := alice.Exec(ctx, `INSERT INTO docs SELECT * FROM incoming WHERE id = 50`)
+	require.NoError(t, err)
+
+	// A source row owned by someone else is rejected.
+	_, err = alice.Exec(ctx, `INSERT INTO docs SELECT * FROM incoming WHERE id = 51`)
+	require.Error(t, err, "row violates WITH CHECK")
+
+	// A batch containing a bad row rejects the whole statement.
+	_, err = alice.Exec(ctx, `INSERT INTO docs SELECT * FROM incoming`)
+	require.Error(t, err)
+
+	// Only the good row landed.
+	var n int
+	require.NoError(t, admin.QueryRow(ctx, `SELECT count(*) FROM docs WHERE id IN (50,51)`).Scan(&n))
+	assert.Equal(t, 1, n)
+}
+
 // TestRLSDefaultDeny: with RLS enabled and no policy for the command, a subject
 // sees nothing.
 func TestRLSDefaultDeny(t *testing.T) {

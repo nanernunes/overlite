@@ -217,11 +217,12 @@ These run so migrations, ORMs, and dumps proceed, but have no real effect:
   rows `UPDATE`/`DELETE` touch; `WITH CHECK` (falling back to `USING`) validates
   `INSERT`. Permissive policies OR together, restrictive ones AND, and RLS with
   no permissive policy is default-deny. The owner (unless `FORCE`), superusers,
-  and `BYPASSRLS` roles are exempt. Parameterized inserts (`VALUES ($1, …)`) and
-  `INSERT … RETURNING` are checked too — the bound params are replayed into the
-  validation and the RETURNING clause is stripped for it. Caveat: the
-  `INSERT … SELECT` and `ON CONFLICT` forms still skip the `WITH CHECK`
-  evaluation (default-deny applies).
+  and `BYPASSRLS` roles are exempt. Parameterized inserts (`VALUES ($1, …)`),
+  `INSERT … RETURNING`, and `INSERT … SELECT` are all checked — the bound params
+  are replayed into the validation, RETURNING is stripped for it, and the source
+  query is validated row-by-row. Caveat: `ON CONFLICT`/`DEFAULT VALUES` inserts
+  skip the `WITH CHECK` (default-deny still applies), and the source read of an
+  `INSERT … SELECT` is not itself RLS-filtered.
 - **Enum columns** — enforced via `TEXT` + `CHECK` and `\dT+` lists the
   elements, but there's no enum ordering/comparison.
 - **Composite types** — `CREATE TYPE … AS (…)` shows in `pg_type`/`\dT`, but the
