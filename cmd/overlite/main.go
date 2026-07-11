@@ -82,8 +82,8 @@ func run(driver, host, db string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	log.Printf("overlite: %s protocol on %s -> sqlite %s (db=%s user=%s auth=%s)",
-		driver, srv.Addr(), db, dbName(db), currentUser(), authMode())
+	log.Printf("overlite: %s protocol on %s -> sqlite %s (db=%s user=%s auth=%s tls=%s)",
+		driver, srv.Addr(), db, dbName(db), currentUser(), authMode(), tlsMode())
 	return srv.Serve(ctx)
 }
 
@@ -115,6 +115,14 @@ func authMode() string {
 		return "password"
 	}
 	return "trust"
+}
+
+func tlsMode() string {
+	if (os.Getenv("POSTGRES_SSL_CERT") != "" && os.Getenv("POSTGRES_SSL_KEY") != "") ||
+		os.Getenv("POSTGRES_SSL") != "" {
+		return "on"
+	}
+	return "off"
 }
 
 func envOr(key, def string) string {

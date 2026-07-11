@@ -50,6 +50,8 @@ container setups.
 | — | `POSTGRES_PORT` | `5432` | listen port (the driver's default, e.g. postgres = 5432) |
 | — | `POSTGRES_USER` | `postgres` | role shown as owner |
 | — | `POSTGRES_PASSWORD` | *(unset)* | when set, requires password auth (else trust) |
+| — | `POSTGRES_SSL` | *(unset)* | `on` enables TLS with a self-signed cert (clients use `sslmode=require`) |
+| — | `POSTGRES_SSL_CERT` / `POSTGRES_SSL_KEY` | *(unset)* | PEM cert/key to serve instead of self-signed |
 
 The port belongs to the driver — postgres defaults to 5432 — and is only
 overridden if you set `<DRIVER>_PORT` (e.g. `POSTGRES_PORT`).
@@ -89,7 +91,7 @@ for a real production system**. ✅ done · 🟡 partial · ⬜ not yet.
 | JSON | ✅ | `->` `->>` `#>` `#>>` and the `json1` functions |
 | COPY / bulk load | ✅ | `FROM STDIN` / `TO STDOUT`, `\copy` (text & CSV) |
 | Introspection | ✅ | `pg_catalog` + `information_schema` (psql `\dt`/`\d`/`\l`, GUIs) |
-| Authentication | 🟡 | trust + `POSTGRES_PASSWORD`; **no SCRAM-SHA-256, no TLS** |
+| Authentication | 🟡 | trust, `POSTGRES_PASSWORD`, and TLS (`sslmode=require`); no SCRAM-SHA-256 |
 | Concurrency | ✅ | dedicated connection per client; reads run in parallel, writes serialize (SQLite single-writer) |
 | Migrations (`ALTER TABLE`) | 🟡 | add/drop/rename column; no `ALTER COLUMN TYPE` / `ADD CONSTRAINT` |
 | Numeric precision | 🟡 | SQLite affinity; not exact fixed-point (money) |

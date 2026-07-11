@@ -10,6 +10,7 @@ package postgres
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"os"
@@ -25,11 +26,14 @@ type Protocol struct {
 	// follows the official Postgres image's POSTGRES_PASSWORD; empty means
 	// trust (any password accepted).
 	password string
+	// tls, when non-nil, lets clients upgrade the connection with SSL.
+	tls *tls.Config
 }
 
-// New returns a ready-to-use Postgres protocol, honoring POSTGRES_PASSWORD.
+// New returns a ready-to-use Postgres protocol, honoring POSTGRES_PASSWORD and
+// the TLS environment (see loadTLS).
 func New() *Protocol {
-	return &Protocol{password: os.Getenv("POSTGRES_PASSWORD")}
+	return &Protocol{password: os.Getenv("POSTGRES_PASSWORD"), tls: loadTLS()}
 }
 
 func (p *Protocol) Name() string { return "postgres" }
@@ -41,7 +45,7 @@ func (p *Protocol) DefaultPort() int { return 5432 }
 func (p *Protocol) Serve(ctx context.Context, conn net.Conn, engine core.Engine) error {
 	c := newWireConn(conn)
 
-	if _, err := c.readStartup(); err != nil {
+	if _, err := c.readStartup(p.tls); err != nil {
 		return err
 	}
 	if err := p.authenticate(c); err != nil {

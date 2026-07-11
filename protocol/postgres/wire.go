@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"bufio"
+	"crypto/tls"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -66,9 +67,11 @@ func newWireConn(c net.Conn) *wireConn {
 	return &wireConn{raw: c, r: bufio.NewReader(c), w: bufio.NewWriter(c)}
 }
 
-// readStartup consumes SSL/GSS negotiation (which we decline) and returns the
-// key/value parameters from the StartupMessage.
-func (c *wireConn) readStartup() (map[string]string, error) {
+// readStartup handles SSL/GSS negotiation and returns the key/value parameters
+// from the StartupMessage. If tlsConfig is non-nil, an SSLRequest is accepted
+// ('S') and the connection is upgraded to TLS; otherwise it is declined ('N')
+// and the client falls back to plaintext.
+func (c *wireConn) readStartup(tlsConfig *tls.Config) (map[string]string, error) {
 	for {
 		length, err := c.readInt32()
 		if err != nil {
@@ -84,8 +87,22 @@ func (c *wireConn) readStartup() (map[string]string, error) {
 		code := int32(byteOrder.Uint32(body[:4]))
 
 		switch code {
-		case sslRequestCode, gssRequestCode:
-			// Decline encryption; a modern client falls back to plaintext.
+		case sslRequestCode:
+			if tlsConfig == nil {
+				if err := c.writeRaw([]byte{'N'}); err != nil {
+					return nil, err
+				}
+				continue
+			}
+			if err := c.writeRaw([]byte{'S'}); err != nil {
+				return nil, err
+			}
+			if err := c.upgradeTLS(tlsConfig); err != nil {
+				return nil, err
+			}
+			continue
+		case gssRequestCode:
+			// We don't support GSSAPI encryption; decline.
 			if err := c.writeRaw([]byte{'N'}); err != nil {
 				return nil, err
 			}
@@ -96,6 +113,20 @@ func (c *wireConn) readStartup() (map[string]string, error) {
 			return nil, fmt.Errorf("unsupported protocol/startup code %d", code)
 		}
 	}
+}
+
+// upgradeTLS performs the server-side TLS handshake and switches the buffered
+// reader/writer to the encrypted connection. The client sends only the
+// SSLRequest before waiting for our reply, so no buffered plaintext is lost.
+func (c *wireConn) upgradeTLS(cfg *tls.Config) error {
+	tconn := tls.Server(c.raw, cfg)
+	if err := tconn.Handshake(); err != nil {
+		return fmt.Errorf("tls handshake: %w", err)
+	}
+	c.raw = tconn
+	c.r = bufio.NewReader(tconn)
+	c.w = bufio.NewWriter(tconn)
+	return nil
 }
 
 func parseStartupParams(b []byte) map[string]string {
