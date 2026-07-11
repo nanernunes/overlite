@@ -119,8 +119,10 @@ func authMode() string {
 		return "trust"
 	case "password":
 		return "password (cleartext)"
-	default:
+	case "md5":
 		return "md5"
+	default:
+		return "scram-sha-256"
 	}
 }
 

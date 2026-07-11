@@ -32,10 +32,13 @@ func TestPasswordAuth(t *testing.T) {
 	assert.Error(t, dial("wrong"), "wrong password should be rejected")
 }
 
-// TestCleartextAuthMethod forces cleartext auth via POSTGRES_HOST_AUTH_METHOD.
-func TestCleartextAuthMethod(t *testing.T) {
+// dialWith checks that method authenticates the right password and rejects the
+// wrong one, for the auth method set in POSTGRES_HOST_AUTH_METHOD.
+func authMethodCheck(t *testing.T, method string) {
 	t.Setenv("POSTGRES_PASSWORD", "pw123")
-	t.Setenv("POSTGRES_HOST_AUTH_METHOD", "password")
+	if method != "" {
+		t.Setenv("POSTGRES_HOST_AUTH_METHOD", method)
+	}
 	addr := startServer(t)
 
 	dial := func(pw string) error {
@@ -49,7 +52,11 @@ func TestCleartextAuthMethod(t *testing.T) {
 		conn.Close(context.Background())
 		return nil
 	}
-
-	assert.NoError(t, dial("pw123"), "correct password should connect (cleartext)")
-	assert.Error(t, dial("nope"), "wrong password should be rejected (cleartext)")
+	assert.NoErrorf(t, dial("pw123"), "correct password should connect (%s)", method)
+	assert.Errorf(t, dial("nope"), "wrong password should be rejected (%s)", method)
 }
+
+func TestSCRAMAuth(t *testing.T)           { authMethodCheck(t, "scram-sha-256") }
+func TestMD5AuthMethod(t *testing.T)       { authMethodCheck(t, "md5") }
+func TestCleartextAuthMethod(t *testing.T) { authMethodCheck(t, "password") }
+func TestDefaultAuthIsSCRAM(t *testing.T)  { authMethodCheck(t, "") }

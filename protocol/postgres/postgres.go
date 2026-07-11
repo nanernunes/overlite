@@ -93,8 +93,8 @@ func (p *Protocol) Serve(ctx context.Context, conn net.Conn, engine core.Engine)
 }
 
 // authMethod resolves the auth method for this connection: trust when no
-// password is set, otherwise POSTGRES_HOST_AUTH_METHOD (md5 by default). SCRAM
-// isn't implemented yet, so it falls back to md5.
+// password is set, otherwise POSTGRES_HOST_AUTH_METHOD (scram-sha-256 by
+// default, matching modern Postgres).
 func (p *Protocol) authMethod() string {
 	if p.password == "" {
 		return "trust"
@@ -104,8 +104,10 @@ func (p *Protocol) authMethod() string {
 		return "trust"
 	case "password":
 		return "password"
-	default: // "md5", "scram-sha-256", or unset
+	case "md5":
 		return "md5"
+	default: // "scram-sha-256", "scram", or unset
+		return "scram"
 	}
 }
 
@@ -116,8 +118,10 @@ func (p *Protocol) authenticate(c *wireConn, user string) error {
 		return nil
 	case "password":
 		return p.authCleartext(c)
-	default:
+	case "md5":
 		return p.authMD5(c, user)
+	default:
+		return p.authSCRAM(c, user)
 	}
 }
 
