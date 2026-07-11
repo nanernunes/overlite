@@ -43,6 +43,13 @@ type session struct {
 	// sqlPrepared holds SQL-level prepared statements (PREPARE name AS ...),
 	// which psql/pg_dump use; distinct from the wire-protocol prepared map.
 	sqlPrepared map[string]string
+
+	// Session identity. authUser is the role that logged in (immutable);
+	// sessionUser (session_user) changes with SET SESSION AUTHORIZATION;
+	// currentRole (current_user) changes with SET ROLE.
+	authUser    string
+	sessionUser string
+	currentRole string
 }
 
 type prepared struct {
@@ -59,6 +66,8 @@ type prepared struct {
 	seqDDL string
 	// typeDDL holds the raw CREATE/ALTER/DROP TYPE statement, run at Execute.
 	typeDDL string
+	// setRole holds a raw SET/RESET ROLE / SESSION AUTHORIZATION statement.
+	setRole string
 }
 
 type portal struct {
@@ -73,7 +82,10 @@ type portal struct {
 	pos    int
 }
 
-func newSession(ctx context.Context, c *wireConn, db core.Session) *session {
+func newSession(ctx context.Context, c *wireConn, db core.Session, user string) *session {
+	if user == "" {
+		user = "postgres"
+	}
 	return &session{
 		ctx:         ctx,
 		c:           c,
@@ -82,6 +94,9 @@ func newSession(ctx context.Context, c *wireConn, db core.Session) *session {
 		portals:     map[string]*portal{},
 		seqCurr:     map[string]int64{},
 		sqlPrepared: map[string]string{},
+		authUser:    user,
+		sessionUser: user,
+		currentRole: user,
 	}
 }
 
@@ -90,7 +105,7 @@ func newSession(ctx context.Context, c *wireConn, db core.Session) *session {
 // first so the integer/label literals they inject are protected by the
 // string-literal-aware rewrite.
 func (s *session) rewriteForExec(raw string) (string, error) {
-	x, err := s.expandSequences(raw)
+	x, err := s.expandSequences(s.expandSessionUser(raw))
 	if err != nil {
 		return "", err
 	}
@@ -307,6 +322,10 @@ func (s *session) handleParse(body []byte) error {
 		s.prepared[name] = &prepared{typeDDL: raw}
 		return s.c.send(msgParseComplete, nil)
 	}
+	if isSetRole(raw) {
+		s.prepared[name] = &prepared{setRole: raw}
+		return s.c.send(msgParseComplete, nil)
+	}
 	sql := rewrite(raw)
 	s.prepared[name] = &prepared{sql: sql, raw: raw, numParams: countParams(sql)}
 	return s.c.send(msgParseComplete, nil)
@@ -368,7 +387,7 @@ func (s *session) handleDescribe(body []byte) error {
 		if prep == nil {
 			return s.protoError("26000", "unknown prepared statement "+quoteName(name))
 		}
-		if prep.util != nil || prep.txControl != "" || prep.seqDDL != "" || prep.typeDDL != "" {
+		if prep.util != nil || prep.txControl != "" || prep.seqDDL != "" || prep.typeDDL != "" || prep.setRole != "" {
 			if err := s.c.sendParameterDescription(0); err != nil {
 				return err
 			}
@@ -386,7 +405,7 @@ func (s *session) handleDescribe(body []byte) error {
 			return s.protoError("34000", "unknown portal "+quoteName(name))
 		}
 		prep = pt.prep
-		if prep.util != nil || prep.txControl != "" || prep.seqDDL != "" || prep.typeDDL != "" {
+		if prep.util != nil || prep.txControl != "" || prep.seqDDL != "" || prep.typeDDL != "" || prep.setRole != "" {
 			return s.sendUtilDescribe(prep.util)
 		}
 		args = pt.params
@@ -469,6 +488,13 @@ func (s *session) handleExecute(body []byte) error {
 			return s.protoError("42000", err.Error())
 		}
 		return s.c.sendCommandComplete(tag)
+	}
+
+	if pt.prep.setRole != "" {
+		if err := s.applySetRole(pt.prep.setRole); err != nil {
+			return s.protoError("22023", err.Error())
+		}
+		return s.c.sendCommandComplete(firstWordUpper(pt.prep.setRole))
 	}
 
 	if u := pt.prep.util; u != nil {

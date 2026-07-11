@@ -193,9 +193,10 @@ These run so migrations, ORMs, and dumps proceed, but have no real effect:
 
 ### Partial (works, with caveats)
 
-- **Roles** — `CREATE`/`ALTER`/`DROP ROLE`/`USER` show up in `\du` and enforce a
-  per-role `PASSWORD` (stored as a SCRAM verifier), but other attributes
-  (`SUPERUSER`, `CREATEDB`, …) aren't enforced.
+- **Roles** — `CREATE`/`ALTER`/`DROP ROLE`/`USER` show up in `\du`, enforce a
+  per-role `PASSWORD` (stored as a SCRAM verifier), and drive `current_user`/
+  `SET ROLE`; but object ownership and privileges (`SUPERUSER`, `GRANT`, …)
+  aren't enforced.
 - **Enum columns** — enforced via `TEXT` + `CHECK` and `\dT+` lists the
   elements, but there's no enum ordering/comparison.
 - **Composite types** — `CREATE TYPE … AS (…)` shows in `pg_type`/`\dT`, but the

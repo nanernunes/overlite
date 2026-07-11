@@ -111,7 +111,7 @@ func (p *Protocol) Serve(ctx context.Context, conn net.Conn, engine core.Engine)
 		return err
 	}
 
-	s := newSession(ctx, c, db)
+	s := newSession(ctx, c, db, params["user"])
 	s.canceler = cl
 	return s.loop()
 }
@@ -406,6 +406,13 @@ func (s *session) handleSimpleQuery(body []byte) error {
 			return s.c.sendError("42000", err.Error())
 		}
 		return s.c.sendCommandComplete(tag)
+	}
+
+	if isSetRole(sql) {
+		if err := s.applySetRole(sql); err != nil {
+			return s.c.sendError("22023", err.Error())
+		}
+		return s.c.sendCommandComplete(firstWordUpper(sql))
 	}
 
 	if handled, err := s.trySQLPrepare(sql); handled {
