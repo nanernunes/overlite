@@ -27,12 +27,43 @@ const (
 	oidInt2      = 21
 	oidInt4      = 23
 	oidText      = 25
+	oidJSON      = 114
 	oidFloat8    = 701
+	oidBpchar    = 1042
+	oidVarchar   = 1043
 	oidDate      = 1082
 	oidTime      = 1083
 	oidNumeric   = 1700
 	oidTimestamp = 1114
+	oidUUID      = 2950
+	oidJSONB     = 3802
 )
+
+// strictDeclOID maps a declared type we can advertise faithfully (and encode in
+// both text and binary) straight from the column's declared type, before value
+// sampling. Integers/floats/numeric are intentionally left to sampling: this
+// SQLite-backed catalog stores oids wider than int4, so all integers advertise
+// as int8.
+func strictDeclOID(decl string) (uint32, bool) {
+	d := strings.ToUpper(decl)
+	switch {
+	case d == "":
+		return 0, false
+	case strings.Contains(d, "BOOL"):
+		return oidBool, true
+	case strings.Contains(d, "JSONB"):
+		return oidJSONB, true
+	case strings.Contains(d, "JSON"):
+		return oidJSON, true
+	case strings.Contains(d, "UUID"):
+		return oidUUID, true
+	case strings.Contains(d, "VARCHAR"), strings.Contains(d, "CHARACTER VARYING"):
+		return oidVarchar, true
+	case strings.Contains(d, "CHAR"), strings.Contains(d, "BPCHAR"):
+		return oidBpchar, true
+	}
+	return 0, false
+}
 
 // timeOID picks date/time/timestamp based on a column's declared type.
 func timeOID(decl string) uint32 {
@@ -77,11 +108,10 @@ func oidForColumn(col core.Column, rows [][]core.Value, idx int) uint32 {
 	if boolCatalogColumns[col.Name] {
 		return oidBool
 	}
-	// A column declared boolean stores 0/1 in SQLite; advertise bool (not int8)
-	// so clients scan it as bool and psql shows t/f. Checked before value
-	// sampling, which would otherwise see the int and pick int8.
-	if strings.Contains(strings.ToUpper(col.DeclType), "BOOL") {
-		return oidBool
+	// A faithfully-mappable declared type wins over value sampling (which would
+	// e.g. see a boolean's 0/1 as int, or a json string as text).
+	if oid, ok := strictDeclOID(col.DeclType); ok {
+		return oid
 	}
 	for _, row := range rows {
 		if idx >= len(row) || row[idx] == nil {
@@ -237,9 +267,34 @@ func encodeBinary(oid uint32, v core.Value) []byte {
 			return b
 		}
 		return []byte(fmt.Sprint(v))
-	default: // text and everything else: UTF-8 bytes
+	case oidJSONB:
+		// jsonb binary format is a 1-byte version (1) followed by the JSON text.
+		return append([]byte{1}, encodeText(oidText, v)...)
+	case oidUUID:
+		if raw, ok := uuidBytes(v); ok {
+			return raw
+		}
+		return encodeText(oidText, v)
+	default: // text, json, varchar, bpchar, ...: UTF-8 bytes
 		return encodeText(oidText, v)
 	}
+}
+
+// uuidBytes parses a canonical UUID string into its 16 raw bytes.
+func uuidBytes(v core.Value) ([]byte, bool) {
+	s, ok := v.(string)
+	if !ok {
+		return nil, false
+	}
+	hexOnly := strings.ReplaceAll(s, "-", "")
+	if len(hexOnly) != 32 {
+		return nil, false
+	}
+	raw, err := hex.DecodeString(hexOnly)
+	if err != nil {
+		return nil, false
+	}
+	return raw, true
 }
 
 func toInt64(v core.Value) int64 {

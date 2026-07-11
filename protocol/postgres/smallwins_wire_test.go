@@ -30,6 +30,44 @@ func TestNoOpUtilityStatements(t *testing.T) {
 	assert.Equal(t, 1, n)
 }
 
+func TestFaithfulTypeOIDs(t *testing.T) {
+	// Extended protocol so pgx requests binary results (exercises the binary
+	// encoders for jsonb/uuid) and exposes the advertised OIDs.
+	conn := connectExtended(t, startServer(t))
+	ctx := context.Background()
+	mustExec(t, conn, `CREATE TABLE typed (
+		a boolean, b integer, c bigint, d text,
+		e varchar(20), f char(4), g json, h jsonb, i uuid, j real)`)
+
+	rows, err := conn.Query(ctx, `SELECT a, b, c, d, e, f, g, h, i, j FROM typed`)
+	require.NoError(t, err)
+	want := []uint32{16, 20, 20, 25, 1043, 1042, 114, 3802, 2950, 701}
+	fds := rows.FieldDescriptions()
+	require.Len(t, fds, len(want))
+	for i, fd := range fds {
+		assert.Equalf(t, want[i], fd.DataTypeOID, "column %q OID", fd.Name)
+	}
+	rows.Close()
+	require.NoError(t, rows.Err())
+
+	// Round-trip real data through the binary path.
+	mustExec(t, conn, `INSERT INTO typed VALUES
+		(true, 1, 2, 'x', 'vc', 'ch', '{"a":1}', '{"b":2}', gen_random_uuid(), 3.5)`)
+	var a bool
+	var b, c int64
+	var d, e, f, g, h, id string
+	var j float64
+	require.NoError(t, conn.QueryRow(ctx,
+		`SELECT a, b, c, d, e, f, g, h, i, j FROM typed`).Scan(&a, &b, &c, &d, &e, &f, &g, &h, &id, &j))
+	assert.True(t, a)
+	assert.EqualValues(t, 1, b)
+	assert.Equal(t, "x", d)
+	assert.Equal(t, "vc", e)
+	assert.JSONEq(t, `{"b":2}`, h)
+	assert.Regexp(t, uuidRE, id)
+	assert.Equal(t, 3.5, j)
+}
+
 func TestAlterTable(t *testing.T) {
 	conn := connect(t, startServer(t))
 	mustExec(t, conn, `CREATE TABLE t (id int, name text)`)
