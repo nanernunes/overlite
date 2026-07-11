@@ -10,7 +10,10 @@ package postgres
 
 import (
 	"context"
+	"crypto/md5"
+	"crypto/rand"
 	"crypto/tls"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"os"
@@ -28,12 +31,19 @@ type Protocol struct {
 	password string
 	// tls, when non-nil, lets clients upgrade the connection with SSL.
 	tls *tls.Config
+	// configuredAuth is POSTGRES_HOST_AUTH_METHOD (trust/password/md5/
+	// scram-sha-256); empty means the default (md5 when a password is set).
+	configuredAuth string
 }
 
-// New returns a ready-to-use Postgres protocol, honoring POSTGRES_PASSWORD and
-// the TLS environment (see loadTLS).
+// New returns a ready-to-use Postgres protocol, honoring POSTGRES_PASSWORD,
+// POSTGRES_HOST_AUTH_METHOD, and the TLS environment (see loadTLS).
 func New() *Protocol {
-	return &Protocol{password: os.Getenv("POSTGRES_PASSWORD"), tls: loadTLS()}
+	return &Protocol{
+		password:       os.Getenv("POSTGRES_PASSWORD"),
+		tls:            loadTLS(),
+		configuredAuth: os.Getenv("POSTGRES_HOST_AUTH_METHOD"),
+	}
 }
 
 func (p *Protocol) Name() string { return "postgres" }
@@ -45,10 +55,11 @@ func (p *Protocol) DefaultPort() int { return 5432 }
 func (p *Protocol) Serve(ctx context.Context, conn net.Conn, engine core.Engine) error {
 	c := newWireConn(conn)
 
-	if _, err := c.readStartup(p.tls); err != nil {
+	params, err := c.readStartup(p.tls)
+	if err != nil {
 		return err
 	}
-	if err := p.authenticate(c); err != nil {
+	if err := p.authenticate(c, params["user"]); err != nil {
 		return err
 	}
 	if err := p.completeHandshake(c); err != nil {
@@ -68,13 +79,44 @@ func (p *Protocol) Serve(ctx context.Context, conn net.Conn, engine core.Engine)
 	return s.loop()
 }
 
-// authenticate performs cleartext password auth when a password is configured,
-// otherwise trusts the client.
-func (p *Protocol) authenticate(c *wireConn) error {
+// authMethod resolves the auth method for this connection: trust when no
+// password is set, otherwise POSTGRES_HOST_AUTH_METHOD (md5 by default). SCRAM
+// isn't implemented yet, so it falls back to md5.
+func (p *Protocol) authMethod() string {
 	if p.password == "" {
-		return nil
+		return "trust"
 	}
-	// AuthenticationCleartextPassword (code 3).
+	switch strings.ToLower(p.configuredAuth) {
+	case "trust":
+		return "trust"
+	case "password":
+		return "password"
+	default: // "md5", "scram-sha-256", or unset
+		return "md5"
+	}
+}
+
+// authenticate runs the resolved auth method against the client.
+func (p *Protocol) authenticate(c *wireConn, user string) error {
+	switch p.authMethod() {
+	case "trust":
+		return nil
+	case "password":
+		return p.authCleartext(c)
+	default:
+		return p.authMD5(c, user)
+	}
+}
+
+// authFailed reports the standard auth failure to the client.
+func (p *Protocol) authFailed(c *wireConn) error {
+	_ = c.sendFatal("28P01", "password authentication failed")
+	_ = c.flush()
+	return fmt.Errorf("password authentication failed")
+}
+
+// authCleartext performs AuthenticationCleartextPassword (code 3).
+func (p *Protocol) authCleartext(c *wireConn) error {
 	if err := c.send(msgAuthentication, i32(3)); err != nil {
 		return err
 	}
@@ -89,11 +131,46 @@ func (p *Protocol) authenticate(c *wireConn) error {
 		return fmt.Errorf("expected password message, got %q", string(typ))
 	}
 	if strings.TrimRight(string(body), "\x00") != p.password {
-		_ = c.sendFatal("28P01", "password authentication failed")
-		_ = c.flush()
-		return fmt.Errorf("password authentication failed")
+		return p.authFailed(c)
 	}
 	return nil
+}
+
+// authMD5 performs AuthenticationMD5Password (code 5): the client returns
+// "md5" + md5(md5(password+user) + salt), which we recompute and compare.
+func (p *Protocol) authMD5(c *wireConn, user string) error {
+	salt := make([]byte, 4)
+	if _, err := rand.Read(salt); err != nil {
+		return err
+	}
+	if err := c.send(msgAuthentication, append(i32(5), salt...)); err != nil {
+		return err
+	}
+	if err := c.flush(); err != nil {
+		return err
+	}
+	typ, body, err := c.readMessage()
+	if err != nil {
+		return err
+	}
+	if typ != msgPasswordMessage {
+		return fmt.Errorf("expected password message, got %q", string(typ))
+	}
+	if strings.TrimRight(string(body), "\x00") != md5Password(p.password, user, salt) {
+		return p.authFailed(c)
+	}
+	return nil
+}
+
+// md5Password computes the Postgres MD5 auth response for a password/user/salt.
+func md5Password(password, user string, salt []byte) string {
+	inner := md5Hex([]byte(password + user))
+	return "md5" + md5Hex(append([]byte(inner), salt...))
+}
+
+func md5Hex(b []byte) string {
+	sum := md5.Sum(b)
+	return hex.EncodeToString(sum[:])
 }
 
 // completeHandshake sends AuthenticationOk (trust), a few parameter statuses,

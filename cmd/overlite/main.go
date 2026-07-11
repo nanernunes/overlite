@@ -111,10 +111,17 @@ func currentUser() string {
 }
 
 func authMode() string {
-	if os.Getenv("POSTGRES_PASSWORD") != "" {
-		return "password"
+	if os.Getenv("POSTGRES_PASSWORD") == "" {
+		return "trust"
 	}
-	return "trust"
+	switch strings.ToLower(os.Getenv("POSTGRES_HOST_AUTH_METHOD")) {
+	case "trust":
+		return "trust"
+	case "password":
+		return "password (cleartext)"
+	default:
+		return "md5"
+	}
 }
 
 func tlsMode() string {
