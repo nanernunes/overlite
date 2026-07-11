@@ -126,7 +126,7 @@ for a real production system**. ✅ done · 🟡 partial · ⬜ not yet.
 | Numeric precision | 🟡 | SQLite affinity; not exact fixed-point (money) |
 | Timestamps with time zone | 🟡 | stored as text; no real `timestamptz` / tz math |
 | Backup / restore | ✅ | `\copy` and `pg_dump` (schema + data: types, constraints, sequences) |
-| Roles & permissions | 🟡 | `\du` roles with enforced passwords, table ownership, `GRANT`/`REVOKE` of table privileges, role membership with `INHERIT`, and `CREATEROLE`/`ADMIN OPTION` policing; no column/row-level security |
+| Roles & permissions | 🟡 | `\du` roles with enforced passwords, table ownership, `GRANT`/`REVOKE` of table privileges, role membership with `INHERIT`, `CREATEROLE`/`ADMIN OPTION` policing, and row-level security (`CREATE POLICY`); no column-level privileges |
 | Server-side logic | ⬜ | PL/pgSQL functions & procedures (triggers only in SQLite syntax) |
 | Sequences | ✅ | `CREATE`/`ALTER`/`DROP SEQUENCE`, `nextval`/`currval`/`setval`/`lastval`, `\ds`; `DEFAULT nextval()` in DDL not supported (use `SERIAL`) |
 | Enum types | 🟡 | `CREATE`/`ALTER`/`DROP TYPE … AS ENUM`, `\dT`; enum columns become `TEXT` + a `CHECK`; no enum ordering semantics |
@@ -204,11 +204,20 @@ These run so migrations, ORMs, and dumps proceed, but have no real effect:
   `CREATE`/`ALTER`/`DROP ROLE` require `CREATEROLE`, and membership can be
   granted on only by a superuser or a holder of `ADMIN OPTION` (which the
   creator gets automatically, and `WITH ADMIN OPTION` delegates). Not
-  modeled: column- and row-level security, `GRANT` on
-  schemas/sequences/functions, and the other role attributes (`SUPERUSER`,
-  `CREATEDB`, …) beyond `INHERIT`/`CREATEROLE`. Superusers and roles that were
-  never `CREATE ROLE`'d bypass the checks, so existing single-user setups are
+  modeled: column-level privileges, `GRANT` on schemas/sequences/functions,
+  and the other role attributes (`SUPERUSER`, `CREATEDB`, …) beyond
+  `INHERIT`/`CREATEROLE`/`BYPASSRLS`. Superusers and roles that were never
+  `CREATE ROLE`'d bypass the checks, so existing single-user setups are
   unaffected.
+- **Row-level security** — `ALTER TABLE … ENABLE`/`FORCE ROW LEVEL SECURITY`
+  plus `CREATE POLICY … USING (…) [WITH CHECK (…)]`. `USING` filters `SELECT`
+  (tables in `FROM`/`JOIN` are wrapped in a filtering subquery) and limits which
+  rows `UPDATE`/`DELETE` touch; `WITH CHECK` (falling back to `USING`) validates
+  `INSERT`. Permissive policies OR together, restrictive ones AND, and RLS with
+  no permissive policy is default-deny. The owner (unless `FORCE`), superusers,
+  and `BYPASSRLS` roles are exempt. Caveat: parameterized (`$1`) inserts and the
+  `INSERT … SELECT`/`ON CONFLICT`/`RETURNING` forms skip the `WITH CHECK`
+  evaluation (default-deny still applies).
 - **Enum columns** — enforced via `TEXT` + `CHECK` and `\dT+` lists the
   elements, but there's no enum ordering/comparison.
 - **Composite types** — `CREATE TYPE … AS (…)` shows in `pg_type`/`\dT`, but the

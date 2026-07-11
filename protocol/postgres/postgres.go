@@ -400,6 +400,16 @@ func (s *session) handleSimpleQuery(body []byte) error {
 		return s.c.sendCommandComplete(tag)
 	}
 
+	if tag, handled, err := s.tryRLSDDL(sql); handled {
+		if err != nil {
+			if s.tx != nil {
+				s.txFailed = true
+			}
+			return s.c.sendError("42000", err.Error())
+		}
+		return s.c.sendCommandComplete(tag)
+	}
+
 	if tag, handled, err := s.trySequenceDDL(sql); handled {
 		if err != nil {
 			if s.tx != nil {
@@ -449,6 +459,16 @@ func (s *session) handleSimpleQuery(body []byte) error {
 			s.txFailed = true
 		}
 		return s.c.sendError("42501", err.Error())
+	}
+
+	if handled, rs, err := s.tryRLSInsert(sql); handled {
+		if err != nil {
+			if s.tx != nil {
+				s.txFailed = true
+			}
+			return s.c.sendError("42501", err.Error())
+		}
+		return s.c.sendCommandComplete(commandTag(rs))
 	}
 
 	// Expand sequence calls and enum columns on the raw statement, before the

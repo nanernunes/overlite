@@ -74,6 +74,8 @@ type prepared struct {
 	setRole string
 	// grant holds a raw GRANT/REVOKE statement, applied at Execute.
 	grant string
+	// rlsDDL holds a raw RLS DDL statement (ALTER TABLE … RLS / CREATE POLICY).
+	rlsDDL string
 }
 
 type portal struct {
@@ -111,7 +113,7 @@ func newSession(ctx context.Context, c *wireConn, db core.Session, user string) 
 // first so the integer/label literals they inject are protected by the
 // string-literal-aware rewrite.
 func (s *session) rewriteForExec(raw string) (string, error) {
-	x, err := s.expandSequences(s.expandSessionUser(raw))
+	x, err := s.expandSequences(s.expandSessionUser(s.applyRLS(raw)))
 	if err != nil {
 		return "", err
 	}
@@ -336,6 +338,10 @@ func (s *session) handleParse(body []byte) error {
 		s.prepared[name] = &prepared{grant: raw}
 		return s.c.send(msgParseComplete, nil)
 	}
+	if isRLSDDL(raw) {
+		s.prepared[name] = &prepared{rlsDDL: raw}
+		return s.c.send(msgParseComplete, nil)
+	}
 	sql := rewrite(raw)
 	s.prepared[name] = &prepared{sql: sql, raw: raw, numParams: countParams(sql)}
 	return s.c.send(msgParseComplete, nil)
@@ -397,7 +403,7 @@ func (s *session) handleDescribe(body []byte) error {
 		if prep == nil {
 			return s.protoError("26000", "unknown prepared statement "+quoteName(name))
 		}
-		if prep.util != nil || prep.txControl != "" || prep.seqDDL != "" || prep.typeDDL != "" || prep.setRole != "" || prep.grant != "" {
+		if prep.util != nil || prep.txControl != "" || prep.seqDDL != "" || prep.typeDDL != "" || prep.setRole != "" || prep.grant != "" || prep.rlsDDL != "" {
 			if err := s.c.sendParameterDescription(0); err != nil {
 				return err
 			}
@@ -415,7 +421,7 @@ func (s *session) handleDescribe(body []byte) error {
 			return s.protoError("34000", "unknown portal "+quoteName(name))
 		}
 		prep = pt.prep
-		if prep.util != nil || prep.txControl != "" || prep.seqDDL != "" || prep.typeDDL != "" || prep.setRole != "" || prep.grant != "" {
+		if prep.util != nil || prep.txControl != "" || prep.seqDDL != "" || prep.typeDDL != "" || prep.setRole != "" || prep.grant != "" || prep.rlsDDL != "" {
 			return s.sendUtilDescribe(prep.util)
 		}
 		args = pt.params
@@ -518,6 +524,17 @@ func (s *session) handleExecute(body []byte) error {
 		return s.c.sendCommandComplete(tag)
 	}
 
+	if pt.prep.rlsDDL != "" {
+		tag, _, err := s.tryRLSDDL(pt.prep.rlsDDL)
+		if err != nil {
+			if s.tx != nil {
+				s.txFailed = true
+			}
+			return s.protoError("42000", err.Error())
+		}
+		return s.c.sendCommandComplete(tag)
+	}
+
 	if u := pt.prep.util; u != nil {
 		if u.IsQuery {
 			oids := make([]uint32, len(u.Columns))
@@ -539,6 +556,18 @@ func (s *session) handleExecute(body []byte) error {
 				s.txFailed = true
 			}
 			return s.protoError("42501", err.Error())
+		}
+		if len(pt.params) == 0 {
+			if handled, rs, err := s.tryRLSInsert(pt.prep.raw); handled {
+				if err != nil {
+					if s.tx != nil {
+						s.txFailed = true
+					}
+					return s.protoError("42501", err.Error())
+				}
+				s.resetPortal(pt)
+				return s.c.sendCommandComplete(commandTag(rs))
+			}
 		}
 		execSQL, err := s.rewriteForExec(pt.prep.raw)
 		if err != nil {

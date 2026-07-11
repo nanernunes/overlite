@@ -194,6 +194,13 @@ func setupConnection(ctx context.Context, exec func(string) error, query func(st
 		return err
 	}
 	_ = exec(membershipsAddAdminDDL) // migrate older tables; errors if present
+	// Row-level security flags and policies.
+	if err := exec(rlsTableDDL); err != nil {
+		return err
+	}
+	if err := exec(policiesTableDDL); err != nil {
+		return err
+	}
 	// Expose each sequence as a one-row relation (last_value/is_called), as
 	// Postgres does, so pg_dump can read its current value with
 	// "SELECT last_value, is_called FROM <seq>".
