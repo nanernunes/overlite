@@ -412,6 +412,11 @@ func (s *session) tryRLSInsert(sql string, params []core.Value) (bool, *core.Res
 	if !subject {
 		return false, nil, nil
 	}
+	// An upsert's DO UPDATE writes the final row, which must satisfy the UPDATE
+	// policy — validated post-hoc on the affected rows (not the insert source).
+	if hasDoUpdate(sql) {
+		return s.rlsCheckUpsert(sql, params, bare)
+	}
 	// The row source is everything after the target/column-list — VALUES (…) or
 	// SELECT …, both valid as a CTE body — minus any trailing ON CONFLICT /
 	// RETURNING. The check applies to the source (insert-path) rows.
@@ -456,6 +461,67 @@ func (s *session) tryRLSInsert(sql string, params []core.Value) (bool, *core.Res
 	}
 	// All rows pass; let the normal INSERT path execute the statement as-is.
 	return false, nil, nil
+}
+
+// hasDoUpdate reports whether the statement is an upsert with a DO UPDATE action
+// (as opposed to DO NOTHING).
+func hasDoUpdate(sql string) bool {
+	low := strings.ToLower(sql)
+	c := topLevelOnConflict(low)
+	return c >= 0 && strings.Contains(low[c:], "do update")
+}
+
+// rlsCheckUpsert runs an ON CONFLICT DO UPDATE upsert inside a savepoint,
+// tacking the UPDATE policy expression onto RETURNING so every affected row (the
+// final, post-update version) is validated. If any fails, it rolls back and
+// rejects. A client RETURNING is preserved and projected back.
+func (s *session) rlsCheckUpsert(sql string, params []core.Value, bare string) (bool, *core.ResultSet, error) {
+	perm, restr := s.gatherPolicies(bare, "UPDATE", true)
+	updExpr := combineRLS(perm, restr)
+
+	body := strings.TrimRight(sql, "; \t\n")
+	clientRet := ""
+	if ri := topLevelKeyword(body, "returning"); ri >= 0 {
+		clientRet = strings.TrimSpace(body[ri+len("returning"):])
+		body = body[:ri]
+	}
+	ret := "(" + updExpr + ") AS _rls_ok"
+	if clientRet != "" {
+		ret = clientRet + ", " + ret
+	}
+	execSQL, err := s.rewriteForExec(body + " RETURNING " + ret)
+	if err != nil {
+		return true, nil, err
+	}
+
+	if _, err := s.exec("SAVEPOINT _rls_up", nil); err != nil {
+		return false, nil, nil // can't guard it; let the normal path run
+	}
+	rs, err := s.exec(execSQL, params)
+	if err != nil {
+		_, _ = s.exec("ROLLBACK TO _rls_up", nil)
+		_, _ = s.exec("RELEASE _rls_up", nil)
+		return true, nil, err
+	}
+	okCol := len(rs.Columns) - 1
+	for _, row := range rs.Rows {
+		if okCol < 0 || !truthy(row[okCol]) {
+			_, _ = s.exec("ROLLBACK TO _rls_up", nil)
+			_, _ = s.exec("RELEASE _rls_up", nil)
+			return true, nil, fmt.Errorf("new row violates row-level security policy for table %q", bare)
+		}
+	}
+	_, _ = s.exec("RELEASE _rls_up", nil)
+
+	out := &core.ResultSet{Command: "INSERT", RowsAffected: int64(len(rs.Rows))}
+	if clientRet != "" { // project the client's RETURNING columns back (drop _rls_ok)
+		out.IsQuery = true
+		out.Columns = rs.Columns[:okCol]
+		for _, row := range rs.Rows {
+			out.Rows = append(out.Rows, row[:okCol])
+		}
+	}
+	return true, out, nil
 }
 
 // parseInsert extracts the target table token, an explicit column list (if any),

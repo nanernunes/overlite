@@ -468,6 +468,11 @@ func (s *session) handleSimpleQuery(body []byte) error {
 			}
 			return s.c.sendError("42501", err.Error())
 		}
+		if rs.IsQuery { // DO UPDATE … RETURNING passed the row check
+			if err := s.c.sendResultSet(rs); err != nil {
+				return err
+			}
+		}
 		return s.c.sendCommandComplete(commandTag(rs))
 	}
 

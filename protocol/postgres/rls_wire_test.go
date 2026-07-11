@@ -220,6 +220,43 @@ func TestRLSInsertOnConflict(t *testing.T) {
 	assert.Equal(t, 1, n)
 }
 
+// TestRLSUpsertUpdateCheck: a DO UPDATE SET cannot write a row that violates the
+// policy — the post-update row is validated, not just the insert source.
+func TestRLSUpsertUpdateCheck(t *testing.T) {
+	t.Setenv("POSTGRES_PASSWORD", "adminpw")
+	addr := startServer(t)
+	ctx := context.Background()
+	admin := connectAs(t, addr, "postgres", "adminpw")
+	mustExec(t, admin, `CREATE ROLE alice LOGIN PASSWORD 'a'`)
+	mustExec(t, admin, `CREATE TABLE items (id int PRIMARY KEY, owner text, body text)`)
+	mustExec(t, admin, `INSERT INTO items VALUES (1,'alice','a')`)
+	mustExec(t, admin, `GRANT ALL ON items TO alice`)
+	mustExec(t, admin, `ALTER TABLE items ENABLE ROW LEVEL SECURITY`)
+	mustExec(t, admin, `CREATE POLICY own ON items FOR ALL USING (owner = current_user)`)
+
+	alice := connectAs(t, addr, "alice", "a")
+
+	// Legit update of her own row.
+	_, err := alice.Exec(ctx, `INSERT INTO items VALUES (1,'alice','x') ON CONFLICT (id) DO UPDATE SET body = 'x'`)
+	require.NoError(t, err)
+
+	// The hole: try to hand her row to bob via DO UPDATE SET owner.
+	_, err = alice.Exec(ctx, `INSERT INTO items VALUES (1,'alice','y') ON CONFLICT (id) DO UPDATE SET owner = 'bob'`)
+	require.Error(t, err, "post-update row must still satisfy the policy")
+
+	// The row is untouched by the rejected upsert.
+	var owner, body string
+	require.NoError(t, admin.QueryRow(ctx, `SELECT owner, body FROM items WHERE id = 1`).Scan(&owner, &body))
+	assert.Equal(t, "alice", owner)
+	assert.Equal(t, "x", body)
+
+	// A legit upsert with RETURNING still returns its row.
+	var id int
+	require.NoError(t, alice.QueryRow(ctx,
+		`INSERT INTO items VALUES (1,'alice','z') ON CONFLICT (id) DO UPDATE SET body = 'z' RETURNING id`).Scan(&id))
+	assert.Equal(t, 1, id)
+}
+
 // TestRLSDefaultDeny: with RLS enabled and no policy for the command, a subject
 // sees nothing.
 func TestRLSDefaultDeny(t *testing.T) {

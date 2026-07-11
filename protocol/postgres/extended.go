@@ -564,6 +564,15 @@ func (s *session) handleExecute(body []byte) error {
 				}
 				return s.protoError("42501", err.Error())
 			}
+			if rs.IsQuery { // DO UPDATE … RETURNING passed the row check
+				oids := make([]uint32, len(rs.Columns))
+				for i, col := range rs.Columns {
+					oids[i] = oidForColumn(col, rs.Rows, i)
+				}
+				if err := s.c.sendDataRows(rs.Rows, oids, pt.formats); err != nil {
+					return err
+				}
+			}
 			s.resetPortal(pt)
 			return s.c.sendCommandComplete(commandTag(rs))
 		}
