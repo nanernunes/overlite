@@ -182,6 +182,14 @@ func setupConnection(ctx context.Context, exec func(string) error, query func(st
 	if err := exec(compositeTypesTableDDL); err != nil {
 		return err
 	}
+	// The internal privilege tables (GRANT/REVOKE storage + table ownership),
+	// consulted by the protocol before running a statement.
+	if err := exec(grantsTableDDL); err != nil {
+		return err
+	}
+	if err := exec(ownersTableDDL); err != nil {
+		return err
+	}
 	// Expose each sequence as a one-row relation (last_value/is_called), as
 	// Postgres does, so pg_dump can read its current value with
 	// "SELECT last_value, is_called FROM <seq>".

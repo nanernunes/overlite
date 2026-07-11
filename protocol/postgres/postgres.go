@@ -385,6 +385,18 @@ func (s *session) handleSimpleQuery(body []byte) error {
 			}
 			return s.c.sendError("42000", err.Error())
 		}
+		s.clearPrivCache() // superuser/managed status may have changed
+		return s.c.sendCommandComplete(tag)
+	}
+
+	if isGrant(sql) {
+		tag, err := s.applyGrant(sql)
+		if err != nil {
+			if s.tx != nil {
+				s.txFailed = true
+			}
+			return s.c.sendError("42000", err.Error())
+		}
 		return s.c.sendCommandComplete(tag)
 	}
 
@@ -432,6 +444,13 @@ func (s *session) handleSimpleQuery(body []byte) error {
 		return s.c.sendCommandComplete(commandTag(rs))
 	}
 
+	if err := s.checkPrivileges(sql); err != nil {
+		if s.tx != nil {
+			s.txFailed = true
+		}
+		return s.c.sendError("42501", err.Error())
+	}
+
 	// Expand sequence calls and enum columns on the raw statement, before the
 	// dialect rewrite (see rewriteForExec).
 	rewritten, err := s.rewriteForExec(sql)
@@ -450,6 +469,7 @@ func (s *session) handleSimpleQuery(body []byte) error {
 		}
 		return s.sendExecError(err)
 	}
+	s.recordOwnership(sql)
 	if rs.IsQuery {
 		if err := s.c.sendResultSet(rs); err != nil {
 			return err

@@ -126,7 +126,7 @@ for a real production system**. ✅ done · 🟡 partial · ⬜ not yet.
 | Numeric precision | 🟡 | SQLite affinity; not exact fixed-point (money) |
 | Timestamps with time zone | 🟡 | stored as text; no real `timestamptz` / tz math |
 | Backup / restore | ✅ | `\copy` and `pg_dump` (schema + data: types, constraints, sequences) |
-| Roles & permissions | 🟡 | `CREATE`/`ALTER`/`DROP ROLE`/`USER` in `\du` with enforced per-role passwords; `GRANT`/`REVOKE` accepted as no-ops; no privileges or row-level security |
+| Roles & permissions | 🟡 | `CREATE`/`ALTER`/`DROP ROLE`/`USER` in `\du`, enforced per-role passwords, table ownership, and enforced `GRANT`/`REVOKE` of table privileges; no column/row-level security or role membership |
 | Server-side logic | ⬜ | PL/pgSQL functions & procedures (triggers only in SQLite syntax) |
 | Sequences | ✅ | `CREATE`/`ALTER`/`DROP SEQUENCE`, `nextval`/`currval`/`setval`/`lastval`, `\ds`; `DEFAULT nextval()` in DDL not supported (use `SERIAL`) |
 | Enum types | 🟡 | `CREATE`/`ALTER`/`DROP TYPE … AS ENUM`, `\dT`; enum columns become `TEXT` + a `CHECK`; no enum ordering semantics |
@@ -182,7 +182,6 @@ These would require emulating features SQLite fundamentally lacks:
 
 These run so migrations, ORMs, and dumps proceed, but have no real effect:
 
-- **`GRANT` / `REVOKE`** and role attributes — no per-object privileges or RLS.
 - **`COMMENT ON`** — accepted, not stored.
 - **`CREATE`/`DROP EXTENSION`** — the common functions (e.g. `gen_random_uuid`)
   are provided directly.
@@ -193,10 +192,15 @@ These run so migrations, ORMs, and dumps proceed, but have no real effect:
 
 ### Partial (works, with caveats)
 
-- **Roles** — `CREATE`/`ALTER`/`DROP ROLE`/`USER` show up in `\du`, enforce a
-  per-role `PASSWORD` (stored as a SCRAM verifier), and drive `current_user`/
-  `SET ROLE`; but object ownership and privileges (`SUPERUSER`, `GRANT`, …)
-  aren't enforced.
+- **Roles & privileges** — `CREATE`/`ALTER`/`DROP ROLE`/`USER` show up in `\du`,
+  enforce a per-role `PASSWORD` (stored as a SCRAM verifier), drive
+  `current_user`/`SET ROLE`, and enforce table `GRANT`/`REVOKE`
+  (`SELECT`/`INSERT`/`UPDATE`/`DELETE`/`TRUNCATE`/`ALL`) against the connected
+  role, with the creating role owning its tables. Not modeled: column- and
+  row-level security, role membership/inheritance, `GRANT` on
+  schemas/sequences/functions, and the other role attributes (`SUPERUSER`,
+  `CREATEDB`, …). Superusers and roles that were never `CREATE ROLE`'d bypass
+  the checks, so existing single-user setups are unaffected.
 - **Enum columns** — enforced via `TEXT` + `CHECK` and `\dT+` lists the
   elements, but there's no enum ordering/comparison.
 - **Composite types** — `CREATE TYPE … AS (…)` shows in `pg_type`/`\dT`, but the
