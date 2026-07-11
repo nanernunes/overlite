@@ -394,10 +394,11 @@ func (s *session) injectRLSWhere(sql, command string) string {
 	return body + semi
 }
 
-// tryRLSInsert enforces WITH CHECK on INSERT … VALUES for a subject role by
-// running the insert through the check inside a savepoint and rejecting the
-// statement if any row is filtered out.
-func (s *session) tryRLSInsert(sql string) (bool, *core.ResultSet, error) {
+// tryRLSInsert enforces WITH CHECK on INSERT … VALUES for a subject role. It
+// counts how many of the new rows satisfy the policy versus how many were given
+// (binding the same params, so parameterized inserts are covered) and, if any
+// row fails, rejects the statement before the real INSERT runs.
+func (s *session) tryRLSInsert(sql string, params []core.Value) (bool, *core.ResultSet, error) {
 	if firstWordUpper(sql) != "INSERT" {
 		return false, nil, nil
 	}
@@ -412,8 +413,7 @@ func (s *session) tryRLSInsert(sql string) (bool, *core.ResultSet, error) {
 	}
 	low := strings.ToLower(sql)
 	// Forms we don't rewrite for the check: enforce default-deny, else allow.
-	if valuesIdx < 0 || strings.Contains(sql, "$") ||
-		strings.Contains(low, "returning") || strings.Contains(low, "on conflict") {
+	if valuesIdx < 0 || strings.Contains(low, "returning") || strings.Contains(low, "on conflict") {
 		if expr == "(0)" {
 			return true, nil, fmt.Errorf("new row violates row-level security policy for table %q", bare)
 		}
@@ -429,13 +429,13 @@ func (s *session) tryRLSInsert(sql string) (bool, *core.ResultSet, error) {
 	collist := strings.Join(cols, ", ")
 	cte := "WITH _rls_src (" + collist + ") AS (VALUES " + values + ") "
 
-	// Validate the new rows against the check before the real INSERT: count how
-	// many rows satisfy the policy vs how many were provided.
-	prov, err := s.exec(cte+"SELECT count(*) FROM _rls_src", nil)
+	// The VALUES may carry the same $N placeholders as the original INSERT, so
+	// bind params to both counts.
+	prov, err := s.exec(rewrite(cte+"SELECT count(*) FROM _rls_src"), params)
 	if err != nil || len(prov.Rows) == 0 {
 		return false, nil, nil // can't validate the VALUES shape; fall back to normal exec
 	}
-	pass, err := s.exec(s.expandSessionUser(cte+"SELECT count(*) FROM _rls_src WHERE "+expr), nil)
+	pass, err := s.exec(rewrite(s.expandSessionUser(cte+"SELECT count(*) FROM _rls_src WHERE "+expr)), params)
 	if err != nil || len(pass.Rows) == 0 {
 		return false, nil, nil
 	}

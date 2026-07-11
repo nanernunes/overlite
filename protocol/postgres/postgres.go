@@ -461,7 +461,7 @@ func (s *session) handleSimpleQuery(body []byte) error {
 		return s.c.sendError("42501", err.Error())
 	}
 
-	if handled, rs, err := s.tryRLSInsert(sql); handled {
+	if handled, rs, err := s.tryRLSInsert(sql, nil); handled {
 		if err != nil {
 			if s.tx != nil {
 				s.txFailed = true

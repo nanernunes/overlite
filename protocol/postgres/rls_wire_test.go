@@ -101,6 +101,27 @@ func TestRLSInsertWithCheck(t *testing.T) {
 	assert.Equal(t, 1, n)
 }
 
+// TestRLSInsertParameterized: WITH CHECK is enforced for parameterized inserts
+// (extended protocol), where the values arrive as bound params.
+func TestRLSInsertParameterized(t *testing.T) {
+	addr := rlsSetup(t)
+	ctx := context.Background()
+	alice := connectAs(t, addr, "alice", "a")
+
+	// A row she owns, passed as parameters, is accepted.
+	_, err := alice.Exec(ctx, `INSERT INTO docs VALUES ($1, $2, $3)`, 20, "alice", "p")
+	require.NoError(t, err)
+
+	// A row owned by someone else is rejected even via params.
+	_, err = alice.Exec(ctx, `INSERT INTO docs (id, owner, body) VALUES ($1, $2, $3)`, 21, "bob", "p")
+	require.Error(t, err, "parameterized row violates WITH CHECK")
+
+	admin := connectAs(t, addr, "postgres", "adminpw")
+	var n int
+	require.NoError(t, admin.QueryRow(ctx, `SELECT count(*) FROM docs WHERE id IN (20,21)`).Scan(&n))
+	assert.Equal(t, 1, n)
+}
+
 // TestRLSDefaultDeny: with RLS enabled and no policy for the command, a subject
 // sees nothing.
 func TestRLSDefaultDeny(t *testing.T) {
