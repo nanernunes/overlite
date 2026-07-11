@@ -109,6 +109,22 @@ schemas: `public`, `sales`, `audit`.
 High level, at a glance — including what's still needed to be **Postgres-ready
 for a real production system**. ✅ done · 🟡 partial · ⬜ not yet.
 
+Across the full feature matrix — **148 items: ✅ 122 · 🟡 17 · ⬜ 9**
+(82% done, 94% at least partial):
+
+| Area | ✅ | 🟡 | ⬜ |
+|---|--:|--:|--:|
+| Wire protocol | 13 | 1 | 0 |
+| Authentication | 9 | 0 | 0 |
+| DML (queries) | 11 | 1 | 1 |
+| DDL (schema) | 24 | 6 | 3 |
+| Data types | 9 | 2 | 2 |
+| Transactions | 7 | 1 | 1 |
+| Schemas (multi-file) | 6 | 1 | 0 |
+| Catalog / introspection | 18 | 2 | 1 |
+| Functions & dialect | 19 | 2 | 1 |
+| Tooling (psql/pg_dump/GUIs) | 6 | 1 | 0 |
+
 | Area | Status | Notes |
 |---|---|---|
 | Wire protocol | ✅ | simple & extended, prepared statements, text/binary |
