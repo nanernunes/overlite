@@ -41,14 +41,33 @@ func logQueryError(phase string, err error, original, rewritten string) {
 // keeps a driver's connection setup working without a real GUC or transaction
 // engine; transaction control is a no-op for now (writes autocommit).
 func interceptUtility(sql string) (*core.ResultSet, bool) {
-	switch firstWordUpper(sql) {
-	case "SET", "RESET", "DISCARD", "LISTEN", "UNLISTEN", "DEALLOCATE", "LOAD", "CHECKPOINT",
-		"GRANT", "REVOKE": // SQLite has no per-object privileges; accept as a no-op
-		return &core.ResultSet{Command: firstWordUpper(sql)}, true
+	w := firstWordUpper(sql)
+	switch w {
+	case "SET", "RESET", "DISCARD", "LISTEN", "UNLISTEN", "NOTIFY", "DEALLOCATE",
+		"LOAD", "CHECKPOINT", "CLUSTER", "ANALYZE",
+		"GRANT", "REVOKE", // SQLite has no per-object privileges; accept as a no-op
+		"COMMENT": // no catalog comments yet; accept so migrations/dumps run
+		return &core.ResultSet{Command: w}, true
 	case "SHOW":
 		return showResult(sql), true
+	case "CREATE", "DROP":
+		// CREATE/DROP EXTENSION: we ship no extensions, but accept it so scripts
+		// that enable uuid-ossp/pgcrypto/etc. run (the functions they add, like
+		// gen_random_uuid, are provided directly).
+		if secondWordUpper(sql) == "EXTENSION" {
+			return &core.ResultSet{Command: w + " EXTENSION"}, true
+		}
 	}
 	return nil, false
+}
+
+// secondWordUpper returns the upper-cased second whitespace-delimited word.
+func secondWordUpper(sql string) string {
+	fields := strings.Fields(sql)
+	if len(fields) < 2 {
+		return ""
+	}
+	return strings.ToUpper(strings.TrimRight(fields[1], ";"))
 }
 
 // txControlKind classifies transaction-control statements (handled by the

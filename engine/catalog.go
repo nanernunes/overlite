@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql/driver"
 	"fmt"
 	"io"
@@ -11,6 +12,18 @@ import (
 
 	sqlite "modernc.org/sqlite"
 )
+
+// newUUIDv4 returns a random RFC-4122 version-4 UUID string, backing
+// gen_random_uuid()/uuid_generate_v4().
+func newUUIDv4() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // variant 10
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
+}
 
 // registerCatalog wires up the minimal Postgres-compatible catalog on the
 // SQLite driver. It is process-global (the driver is a singleton) so it runs
@@ -33,6 +46,20 @@ var registerCatalog = sync.OnceFunc(func() {
 			func(_ *sqlite.FunctionContext, args []driver.Value) (driver.Value, error) {
 				return fn(args)
 			})
+	}
+	// scalarND registers a non-deterministic function (e.g. random UUIDs): SQLite
+	// must call it once per row, not fold it to a constant.
+	scalarND := func(name string, nArg int32, fn func([]driver.Value) (driver.Value, error)) {
+		if err := sqlite.RegisterScalarFunction(name, nArg,
+			func(_ *sqlite.FunctionContext, args []driver.Value) (driver.Value, error) {
+				return fn(args)
+			}); err != nil {
+			panic(err)
+		}
+	}
+
+	for _, name := range []string{"gen_random_uuid", "uuid_generate_v4"} {
+		scalarND(name, 0, func([]driver.Value) (driver.Value, error) { return newUUIDv4() })
 	}
 
 	scalar("version", 0, func([]driver.Value) (driver.Value, error) {
@@ -195,6 +222,7 @@ const (
 	typeOIDTimestamp = 1114
 	typeOIDJSON      = 114
 	typeOIDJSONB     = 3802
+	typeOIDUUID      = 2950
 )
 
 // sqliteTypeOID maps a SQLite declared type to a Postgres type OID using
@@ -202,6 +230,8 @@ const (
 func sqliteTypeOID(decl string) int64 {
 	d := strings.ToUpper(decl)
 	switch {
+	case strings.Contains(d, "UUID"):
+		return typeOIDUUID
 	case strings.Contains(d, "JSONB"):
 		return typeOIDJSONB
 	case strings.Contains(d, "JSON"):
@@ -255,6 +285,8 @@ func formatTypeName(oid int64) string {
 		return "json"
 	case typeOIDJSONB:
 		return "jsonb"
+	case typeOIDUUID:
+		return "uuid"
 	default:
 		return "text"
 	}
@@ -337,6 +369,7 @@ var staticCatalogViews = []string{
 	 UNION ALL SELECT 1700, 'numeric',   11, 10, 'b', 'N', -1, 0, 0, 0, 1231, 0, 0, -1, 0, 0, NULL, ','
 	 UNION ALL SELECT 114,  'json',      11, 10, 'b', 'U', -1, 0, 0, 0, 199,  0, 0, -1, 0, 0, NULL, ','
 	 UNION ALL SELECT 3802, 'jsonb',     11, 10, 'b', 'U', -1, 0, 0, 0, 3807, 0, 0, -1, 0, 0, NULL, ','
+	 UNION ALL SELECT 2950, 'uuid',      11, 10, 'b', 'U', 16, 0, 0, 0, 2951, 0, 0, -1, 0, 0, NULL, ','
 	 UNION ALL SELECT CAST(rowid + 90000000 AS INTEGER), typname, 2200, 10, 'e', 'E', 4, 1, 0, 0, 0, 0, 0, -1, 0, 0, NULL, ','
 	           FROM _overlite_enum_types
 	 ) ov_t`,
