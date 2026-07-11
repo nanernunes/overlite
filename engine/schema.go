@@ -167,6 +167,18 @@ func setupConnection(ctx context.Context, exec func(string) error, query func(st
 	if err := exec(sequencesTableDDL); err != nil {
 		return err
 	}
+	// The internal enum tables (pg_type/pg_enum read them; enum columns become
+	// TEXT + CHECK).
+	if err := exec(enumTypesTableDDL); err != nil {
+		return err
+	}
+	if err := exec(enumLabelsTableDDL); err != nil {
+		return err
+	}
+	// Refresh the global enum oid->name registry that format_type() reads.
+	if names, err := query("SELECT (rowid + 90000000) || ':' || typname FROM _overlite_enum_types"); err == nil {
+		refreshEnumNames(names)
+	}
 
 	refs := schemaRefs(attached)
 	for _, stmt := range staticCatalogViews {

@@ -50,6 +50,8 @@ type prepared struct {
 	txControl string
 	// seqDDL holds the raw CREATE/ALTER/DROP SEQUENCE statement, run at Execute.
 	seqDDL string
+	// typeDDL holds the raw CREATE/ALTER/DROP TYPE statement, run at Execute.
+	typeDDL string
 }
 
 type portal struct {
@@ -67,6 +69,22 @@ func newSession(ctx context.Context, c *wireConn, db core.Session) *session {
 		portals:  map[string]*portal{},
 		seqCurr:  map[string]int64{},
 	}
+}
+
+// rewriteForExec applies the session-level expansions (sequence calls, enum
+// columns) to the raw statement, then the dialect rewrite. The expansions run
+// first so the integer/label literals they inject are protected by the
+// string-literal-aware rewrite.
+func (s *session) rewriteForExec(raw string) (string, error) {
+	x, err := s.expandSequences(raw)
+	if err != nil {
+		return "", err
+	}
+	x, err = s.expandEnums(x)
+	if err != nil {
+		return "", err
+	}
+	return rewrite(x), nil
 }
 
 // exec runs a statement in the current transaction, or autocommit if none.
@@ -253,6 +271,10 @@ func (s *session) handleParse(body []byte) error {
 		s.prepared[name] = &prepared{seqDDL: raw}
 		return s.c.send(msgParseComplete, nil)
 	}
+	if isTypeDDL(raw) {
+		s.prepared[name] = &prepared{typeDDL: raw}
+		return s.c.send(msgParseComplete, nil)
+	}
 	sql := rewrite(raw)
 	s.prepared[name] = &prepared{sql: sql, raw: raw, numParams: countParams(sql)}
 	return s.c.send(msgParseComplete, nil)
@@ -314,7 +336,7 @@ func (s *session) handleDescribe(body []byte) error {
 		if prep == nil {
 			return s.protoError("26000", "unknown prepared statement "+quoteName(name))
 		}
-		if prep.util != nil || prep.txControl != "" || prep.seqDDL != "" {
+		if prep.util != nil || prep.txControl != "" || prep.seqDDL != "" || prep.typeDDL != "" {
 			if err := s.c.sendParameterDescription(0); err != nil {
 				return err
 			}
@@ -332,7 +354,7 @@ func (s *session) handleDescribe(body []byte) error {
 			return s.protoError("34000", "unknown portal "+quoteName(name))
 		}
 		prep = pt.prep
-		if prep.util != nil || prep.txControl != "" || prep.seqDDL != "" {
+		if prep.util != nil || prep.txControl != "" || prep.seqDDL != "" || prep.typeDDL != "" {
 			return s.sendUtilDescribe(prep.util)
 		}
 		args = pt.params
@@ -399,6 +421,17 @@ func (s *session) handleExecute(body []byte) error {
 		return s.c.sendCommandComplete(tag)
 	}
 
+	if pt.prep.typeDDL != "" {
+		tag, _, err := s.tryTypeDDL(pt.prep.typeDDL)
+		if err != nil {
+			if s.tx != nil {
+				s.txFailed = true
+			}
+			return s.protoError("42000", err.Error())
+		}
+		return s.c.sendCommandComplete(tag)
+	}
+
 	if u := pt.prep.util; u != nil {
 		if u.IsQuery {
 			oids := make([]uint32, len(u.Columns))
@@ -412,17 +445,12 @@ func (s *session) handleExecute(body []byte) error {
 		return s.c.sendCommandComplete(commandTag(u))
 	}
 
-	execSQL := pt.prep.sql
-	if hasSeqFunc(pt.prep.raw) {
-		// Expand on the raw statement, then rewrite (see handleSimpleQuery).
-		expanded, err := s.expandSequences(pt.prep.raw)
-		if err != nil {
-			if s.tx != nil {
-				s.txFailed = true
-			}
-			return s.protoError("42P01", err.Error())
+	execSQL, err := s.rewriteForExec(pt.prep.raw)
+	if err != nil {
+		if s.tx != nil {
+			s.txFailed = true
 		}
-		execSQL = rewrite(expanded)
+		return s.protoError("42P01", err.Error())
 	}
 	rs, err := s.exec(execSQL, pt.params)
 	if err != nil {

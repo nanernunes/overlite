@@ -57,6 +57,11 @@ var registerCatalog = sync.OnceFunc(func() {
 	}
 	scalar("pg_relation_is_publishable", -1, func([]driver.Value) (driver.Value, error) { return int64(0), nil })
 	scalar("pg_function_is_visible", 1, func([]driver.Value) (driver.Value, error) { return int64(1), nil })
+	scalar("pg_type_is_visible", 1, func([]driver.Value) (driver.Value, error) { return int64(1), nil })
+	// obj_description/col_description look up comments; we store none, so NULL.
+	for _, name := range []string{"obj_description", "col_description", "shobj_description"} {
+		scalar(name, -1, func([]driver.Value) (driver.Value, error) { return nil, nil })
+	}
 	scalar("pg_encoding_to_char", 1, func([]driver.Value) (driver.Value, error) { return "UTF8", nil })
 	for _, name := range []string{"pg_get_function_result", "pg_get_function_arguments", "array_to_string"} {
 		scalar(name, -1, func([]driver.Value) (driver.Value, error) { return "", nil })
@@ -116,7 +121,11 @@ var registerCatalog = sync.OnceFunc(func() {
 		if len(args) == 0 {
 			return nil, nil
 		}
-		return formatTypeName(asInt64(args[0])), nil
+		oid := asInt64(args[0])
+		if name, ok := lookupEnumName(oid); ok {
+			return name, nil
+		}
+		return formatTypeName(oid), nil
 	})
 	scalar("overlite_type_oid", 1, func(args []driver.Value) (driver.Value, error) {
 		if len(args) == 0 {
@@ -306,7 +315,11 @@ func asInt64(v driver.Value) int64 {
 // The schema-spanning views (pg_namespace/pg_class/pg_attribute/pg_index/
 // pg_constraint/information_schema.*) are generated in catalog_views.go.
 var staticCatalogViews = []string{
+	// The outer SELECT adds the columns \dT+ and pg_dump read (typacl,
+	// typispreferred, typisdefined, ...) without touching every UNION row.
 	`CREATE TEMP VIEW IF NOT EXISTS pg_type AS
+	 SELECT ov_t.*, NULL AS typacl, 0 AS typispreferred, 1 AS typisdefined,
+	        '-' AS typalign, 'p' AS typstorage, 0 AS typrelid2 FROM (
 	 SELECT 16 AS oid, 'bool' AS typname, 11 AS typnamespace, 10 AS typowner,
 	        'b' AS typtype, 'B' AS typcategory, 1 AS typlen, 0 AS typbyval,
 	        0 AS typrelid, 0 AS typelem, 1000 AS typarray, 0 AS typnotnull,
@@ -323,7 +336,16 @@ var staticCatalogViews = []string{
 	 UNION ALL SELECT 1114, 'timestamp', 11, 10, 'b', 'D', 8,  1, 0, 0, 1115, 0, 0, -1, 0, 0, NULL, ','
 	 UNION ALL SELECT 1700, 'numeric',   11, 10, 'b', 'N', -1, 0, 0, 0, 1231, 0, 0, -1, 0, 0, NULL, ','
 	 UNION ALL SELECT 114,  'json',      11, 10, 'b', 'U', -1, 0, 0, 0, 199,  0, 0, -1, 0, 0, NULL, ','
-	 UNION ALL SELECT 3802, 'jsonb',     11, 10, 'b', 'U', -1, 0, 0, 0, 3807, 0, 0, -1, 0, 0, NULL, ','`,
+	 UNION ALL SELECT 3802, 'jsonb',     11, 10, 'b', 'U', -1, 0, 0, 0, 3807, 0, 0, -1, 0, 0, NULL, ','
+	 UNION ALL SELECT CAST(rowid + 90000000 AS INTEGER), typname, 2200, 10, 'e', 'E', 4, 1, 0, 0, 0, 0, 0, -1, 0, 0, NULL, ','
+	           FROM _overlite_enum_types
+	 ) ov_t`,
+
+	`CREATE TEMP VIEW IF NOT EXISTS pg_enum AS
+	 SELECT CAST(e.rowid AS INTEGER) AS oid,
+	        CAST((SELECT t.rowid + 90000000 FROM _overlite_enum_types t WHERE t.typname = e.typname) AS INTEGER) AS enumtypid,
+	        CAST(e.sortorder AS REAL) AS enumsortorder, e.label AS enumlabel
+	 FROM _overlite_enums e`,
 
 	`CREATE TEMP VIEW IF NOT EXISTS pg_auth_members AS
 	 SELECT 0 AS oid, 0 AS roleid, 0 AS member, 0 AS grantor, 0 AS admin_option

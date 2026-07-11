@@ -100,7 +100,8 @@ for a real production system**. ✅ done · 🟡 partial · ⬜ not yet.
 | Roles & permissions | 🟡 | `CREATE`/`ALTER`/`DROP ROLE`/`USER` in `\du`; `GRANT`/`REVOKE` accepted as no-ops; no enforcement or row-level security |
 | Server-side logic | ⬜ | PL/pgSQL functions & procedures (triggers only in SQLite syntax) |
 | Sequences | ✅ | `CREATE`/`ALTER`/`DROP SEQUENCE`, `nextval`/`currval`/`setval`/`lastval`, `\ds`; `DEFAULT nextval()` in DDL not supported (use `SERIAL`) |
-| Rich types | ⬜ | arrays, `uuid`, `enum`, ranges, `interval` arithmetic |
+| Enum types | 🟡 | `CREATE`/`ALTER`/`DROP TYPE … AS ENUM`, `\dT`; enum columns become `TEXT` + a `CHECK`; no enum ordering semantics |
+| Rich types | ⬜ | arrays, `uuid`, ranges, `interval` arithmetic |
 | Extensions | ⬜ | `CREATE EXTENSION` (uuid-ossp, pgcrypto, postgis, …) |
 | `LISTEN`/`NOTIFY`, query cancellation | ⬜ | |
 | Replication / HA | ⬜ | |
