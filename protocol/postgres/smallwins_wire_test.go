@@ -30,6 +30,28 @@ func TestNoOpUtilityStatements(t *testing.T) {
 	assert.Equal(t, 1, n)
 }
 
+func TestBooleanType(t *testing.T) {
+	conn := connect(t, startServer(t))
+	ctx := context.Background()
+	mustExec(t, conn, `CREATE TABLE flags (id int, active boolean)`)
+	mustExec(t, conn, `INSERT INTO flags VALUES (1, true), (2, false)`)
+
+	// A declared boolean column scans as Go bool (advertised OID is bool, so the
+	// stored 0/1 is sent as t/f).
+	var active bool
+	require.NoError(t, conn.QueryRow(ctx, `SELECT active FROM flags WHERE id = 1`).Scan(&active))
+	assert.True(t, active)
+	require.NoError(t, conn.QueryRow(ctx, `SELECT active FROM flags WHERE id = 2`).Scan(&active))
+	assert.False(t, active)
+
+	// Round-trip a bool parameter.
+	mustExec(t, conn, `CREATE TABLE p (b boolean)`)
+	_, err := conn.Exec(ctx, `INSERT INTO p (b) VALUES ($1)`, true)
+	require.NoError(t, err)
+	require.NoError(t, conn.QueryRow(ctx, `SELECT b FROM p`).Scan(&active))
+	assert.True(t, active)
+}
+
 func TestJSONContainment(t *testing.T) {
 	conn := connect(t, startServer(t))
 	mustExec(t, conn, `CREATE TABLE docs (id int, body jsonb)`)

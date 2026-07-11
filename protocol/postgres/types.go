@@ -77,6 +77,12 @@ func oidForColumn(col core.Column, rows [][]core.Value, idx int) uint32 {
 	if boolCatalogColumns[col.Name] {
 		return oidBool
 	}
+	// A column declared boolean stores 0/1 in SQLite; advertise bool (not int8)
+	// so clients scan it as bool and psql shows t/f. Checked before value
+	// sampling, which would otherwise see the int and pick int8.
+	if strings.Contains(strings.ToUpper(col.DeclType), "BOOL") {
+		return oidBool
+	}
 	for _, row := range rows {
 		if idx >= len(row) || row[idx] == nil {
 			continue
@@ -137,16 +143,34 @@ func isTextAffinity(decl string) bool {
 	return strings.Contains(d, "CHAR") || strings.Contains(d, "CLOB") || strings.Contains(d, "TEXT")
 }
 
+// boolish reports whether v represents a true boolean, accepting the several
+// forms SQLite may hold for a boolean column (int 0/1, Go bool, or a stored
+// string like 't'/'true'/'yes').
+func boolish(v core.Value) bool {
+	switch x := v.(type) {
+	case bool:
+		return x
+	case string:
+		switch strings.ToLower(strings.TrimSpace(x)) {
+		case "t", "true", "1", "y", "yes", "on":
+			return true
+		}
+		return false
+	default:
+		return toInt64(v) != 0
+	}
+}
+
 // encodeText renders a value in Postgres text format, or returns nil to signal
 // SQL NULL (encoded on the wire as a -1 length).
 func encodeText(oid uint32, v core.Value) []byte {
 	if v == nil {
 		return nil
 	}
-	// Boolean columns may arrive as 0/1 integers from SQLite; normalize to the
-	// Postgres 't'/'f' text form.
+	// Boolean columns may arrive as 0/1 integers or a stored 't'/'true' string;
+	// normalize to the Postgres 't'/'f' text form.
 	if oid == oidBool {
-		if toInt64(v) != 0 {
+		if boolish(v) {
 			return []byte("t")
 		}
 		return []byte("f")
