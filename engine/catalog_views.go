@@ -187,8 +187,10 @@ const pgClassTmpl = `SELECT CAST(m.rowid + @OFF@ AS INTEGER) AS oid, m.name AS r
  0 AS relchecks, 0 AS relhasrules,
  CASE WHEN EXISTS(SELECT 1 FROM @DB@.sqlite_master trg WHERE trg.type='trigger' AND trg.tbl_name=m.name)
       THEN 1 ELSE 0 END AS relhastriggers,
- 0 AS relhassubclass, 0 AS relrowsecurity,
- 0 AS relforcerowsecurity, 1 AS relispopulated, 'd' AS relreplident, 0 AS relispartition,
+ 0 AS relhassubclass,
+ COALESCE((SELECT enabled FROM _overlite_rls rls WHERE lower(rls.tablename)=lower(m.name)),0) AS relrowsecurity,
+ COALESCE((SELECT forced FROM _overlite_rls rls WHERE lower(rls.tablename)=lower(m.name)),0) AS relforcerowsecurity,
+ 1 AS relispopulated, 'd' AS relreplident, 0 AS relispartition,
  NULL AS relacl, NULL AS reloptions, NULL AS relpartbound, 0 AS relrewrite, 0 AS relminmxid
 FROM @DB@.sqlite_master m
 WHERE m.type IN ('table','view','index') AND m.name NOT LIKE 'sqlite_%' AND m.name NOT GLOB '_overlite_*'

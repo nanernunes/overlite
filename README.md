@@ -174,8 +174,10 @@ These would require emulating features SQLite fundamentally lacks:
 
 - **`CREATE TYPE`** range / base types (`… AS ENUM` is modeled and `… AS
   (composite)` is recorded in the catalog; range/base are accepted as a no-op).
-- **Remainder of `pg_catalog`** (`pg_depend`, `pg_statistic`, …) — present but
-  empty.
+- **Part of `pg_catalog`** (`pg_depend`, `pg_statistic`, …) — present but empty.
+  The ones backed by real data are populated: `pg_auth_members` (role
+  membership, so `\du`/`\drg` shows "Member of"), `pg_policy` and
+  `pg_class.relrowsecurity` (so `\d` lists RLS policies).
 - No `LISTEN`/`NOTIFY` delivery, and no replication / HA.
 
 ### Accepted but not enforced (no-ops)

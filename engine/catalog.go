@@ -107,7 +107,7 @@ var registerCatalog = sync.OnceFunc(func() {
 	// argument yields the column default for pg_dump; other callers pass NULL.
 	scalar("pg_get_expr", -1, func(args []driver.Value) (driver.Value, error) {
 		if len(args) == 0 || args[0] == nil {
-			return "", nil
+			return nil, nil // NULL in -> NULL out (e.g. a policy with no WITH CHECK)
 		}
 		return fmt.Sprint(args[0]), nil
 	})
@@ -457,9 +457,14 @@ var staticCatalogViews = []string{
 	        CAST(e.sortorder AS REAL) AS enumsortorder, e.label AS enumlabel
 	 FROM _overlite_enums e`,
 
+	// pg_auth_members: real role membership from _overlite_memberships, with oids
+	// resolved through pg_roles (so psql's \du "Member of" works).
 	`CREATE TEMP VIEW IF NOT EXISTS pg_auth_members AS
-	 SELECT 0 AS oid, 0 AS roleid, 0 AS member, 0 AS grantor, 0 AS admin_option
-	 WHERE 0`,
+	 SELECT m.rowid AS oid, ro.oid AS roleid, mo.oid AS member,
+	        10 AS grantor, m.admin_option AS admin_option
+	 FROM _overlite_memberships m
+	 JOIN pg_roles ro ON lower(ro.rolname) = lower(m.roleof)
+	 JOIN pg_roles mo ON lower(mo.rolname) = lower(m.member)`,
 
 	`CREATE TEMP VIEW IF NOT EXISTS pg_tablespace AS
 	 SELECT 1663 AS oid, 'pg_default' AS spcname, 10 AS spcowner, NULL AS spcacl, NULL AS spcoptions
@@ -490,10 +495,19 @@ var staticCatalogViews = []string{
 	        'O' AS ev_enabled, 0 AS is_instead, NULL AS ev_qual, NULL AS ev_action
 	 WHERE 0`,
 
+	// pg_policy: real RLS policies from _overlite_policies. polcmd maps the
+	// command to Postgres' single-char code; polqual/polwithcheck carry the
+	// expression text (what psql renders for \d). polroles NULL means "to all".
 	`CREATE TEMP VIEW IF NOT EXISTS pg_policy AS
-	 SELECT 0 AS oid, '' AS polname, 0 AS polrelid, '*' AS polcmd,
-	        1 AS polpermissive, NULL AS polroles, NULL AS polqual, NULL AS polwithcheck
-	 WHERE 0`,
+	 SELECT p.rowid AS oid, p.polname AS polname,
+	        (SELECT c.oid FROM pg_class c WHERE lower(c.relname) = lower(p.tablename)
+	          AND c.relkind IN ('r','p') LIMIT 1) AS polrelid,
+	        CASE upper(p.command) WHEN 'SELECT' THEN 'r' WHEN 'INSERT' THEN 'a'
+	          WHEN 'UPDATE' THEN 'w' WHEN 'DELETE' THEN 'd' ELSE '*' END AS polcmd,
+	        p.permissive AS polpermissive, NULL AS polroles,
+	        CASE WHEN p.using_expr = '' THEN NULL ELSE p.using_expr END AS polqual,
+	        CASE WHEN p.check_expr = '' THEN NULL ELSE p.check_expr END AS polwithcheck
+	 FROM _overlite_policies p`,
 
 	`CREATE TEMP VIEW IF NOT EXISTS pg_statistic_ext AS
 	 SELECT 0 AS oid, 0 AS stxrelid, '' AS stxname, 2200 AS stxnamespace,
