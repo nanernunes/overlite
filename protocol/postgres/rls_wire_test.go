@@ -292,6 +292,41 @@ func TestRLSInsertSelectReadFilter(t *testing.T) {
 	assert.Equal(t, []string{"alice"}, got, "bob's row was filtered out of the source")
 }
 
+// TestRLSInsertDefaultValues: the single all-defaults row of INSERT … DEFAULT
+// VALUES is validated against WITH CHECK.
+func TestRLSInsertDefaultValues(t *testing.T) {
+	t.Setenv("POSTGRES_PASSWORD", "adminpw")
+	addr := startServer(t)
+	ctx := context.Background()
+	admin := connectAs(t, addr, "postgres", "adminpw")
+	mustExec(t, admin, `CREATE ROLE alice LOGIN PASSWORD 'a'`)
+
+	// Default satisfies the policy → accepted.
+	mustExec(t, admin, `CREATE TABLE ok_t (id int, tag text DEFAULT 'ok')`)
+	mustExec(t, admin, `GRANT ALL ON ok_t TO alice`)
+	mustExec(t, admin, `ALTER TABLE ok_t ENABLE ROW LEVEL SECURITY`)
+	mustExec(t, admin, `CREATE POLICY p ON ok_t FOR ALL USING (tag = 'ok')`)
+
+	// Default violates the policy → rejected.
+	mustExec(t, admin, `CREATE TABLE bad_t (id int, tag text DEFAULT 'nope')`)
+	mustExec(t, admin, `GRANT ALL ON bad_t TO alice`)
+	mustExec(t, admin, `ALTER TABLE bad_t ENABLE ROW LEVEL SECURITY`)
+	mustExec(t, admin, `CREATE POLICY p ON bad_t FOR ALL USING (tag = 'ok')`)
+
+	alice := connectAs(t, addr, "alice", "a")
+
+	_, err := alice.Exec(ctx, `INSERT INTO ok_t DEFAULT VALUES`)
+	require.NoError(t, err)
+	_, err = alice.Exec(ctx, `INSERT INTO bad_t DEFAULT VALUES`)
+	require.Error(t, err, "the default row violates the policy")
+
+	var okN, badN int
+	require.NoError(t, admin.QueryRow(ctx, `SELECT count(*) FROM ok_t`).Scan(&okN))
+	require.NoError(t, admin.QueryRow(ctx, `SELECT count(*) FROM bad_t`).Scan(&badN))
+	assert.Equal(t, 1, okN)
+	assert.Equal(t, 0, badN)
+}
+
 // TestRLSDefaultDeny: with RLS enabled and no policy for the command, a subject
 // sees nothing.
 func TestRLSDefaultDeny(t *testing.T) {

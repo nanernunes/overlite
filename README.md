@@ -224,8 +224,8 @@ These run so migrations, ORMs, and dumps proceed, but have no real effect:
   DO NOTHING on its insert source, DO UPDATE on the final post-update rows (run
   in a savepoint that rolls back if any row would violate the UPDATE policy). The
   read side of an `INSERT … SELECT` is RLS-filtered too, so only rows the role
-  may see are copied. Caveat: `INSERT … DEFAULT VALUES` skips the `WITH CHECK`
-  (default-deny still applies).
+  may see are copied, and `INSERT … DEFAULT VALUES` validates its all-defaults
+  row.
 - **Enum columns** — enforced via `TEXT` + `CHECK` and `\dT+` lists the
   elements, but there's no enum ordering/comparison.
 - **Composite types** — `CREATE TYPE … AS (…)` shows in `pg_type`/`\dT`, but the

@@ -434,8 +434,19 @@ func (s *session) tryRLSInsert(sql string, params []core.Value) (bool, *core.Res
 	}
 	source = strings.TrimRight(source[:cut], "; \t\n")
 	srcLow := strings.ToLower(strings.TrimSpace(source))
-	// Forms we can't turn into a row-count check: enforce default-deny, else allow.
-	if strings.HasPrefix(srcLow, "default") || strings.HasPrefix(srcLow, "overriding") {
+	if strings.HasPrefix(srcLow, "default") {
+		// INSERT … DEFAULT VALUES: the one new row is every column's default.
+		dcols, defs := s.tableDefaults(bare)
+		if len(dcols) == 0 {
+			if expr == "(0)" {
+				return true, nil, fmt.Errorf("new row violates row-level security policy for table %q", bare)
+			}
+			return false, nil, nil
+		}
+		cols = dcols
+		source = "SELECT " + strings.Join(defs, ", ")
+	} else if strings.HasPrefix(srcLow, "overriding") {
+		// A form we can't turn into a row-count check: default-deny, else allow.
 		if expr == "(0)" {
 			return true, nil, fmt.Errorf("new row violates row-level security policy for table %q", bare)
 		}
@@ -581,6 +592,39 @@ func (s *session) tableColumns(table string) []string {
 		}
 	}
 	return cols
+}
+
+// tableDefaults returns each column and the SQL text of its DEFAULT (or "NULL"),
+// so DEFAULT VALUES can be modeled as a one-row SELECT of those expressions.
+func (s *session) tableDefaults(table string) (cols, defs []string) {
+	rs, err := s.exec("SELECT name, dflt_value FROM pragma_table_info("+sqlStr(table)+")", nil)
+	if err != nil {
+		return nil, nil
+	}
+	for _, row := range rs.Rows {
+		n := asString(row[0])
+		if n == "" {
+			continue
+		}
+		d := "NULL"
+		switch v := row[1].(type) {
+		case string:
+			if v != "" {
+				d = v
+			}
+		case []byte:
+			if len(v) > 0 {
+				d = string(v)
+			}
+		case int64:
+			d = fmt.Sprint(v)
+		case float64:
+			d = fmt.Sprint(v)
+		}
+		cols = append(cols, n)
+		defs = append(defs, d)
+	}
+	return cols, defs
 }
 
 // --- small helpers ----------------------------------------------------------
