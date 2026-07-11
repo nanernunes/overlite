@@ -3,6 +3,7 @@ package engine
 import (
 	"database/sql/driver"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -101,21 +102,185 @@ func datePart(field string, t time.Time) float64 {
 	}
 }
 
-// pgToGoLayout translates the common Postgres to_char format tokens to a Go
-// reference layout. It is intentionally partial (the full set is large).
-var pgToGoLayout = strings.NewReplacer(
-	"YYYY", "2006", "YY", "06",
-	"Month", "January", "Mon", "Jan", "MM", "01",
-	"Day", "Monday", "Dy", "Mon", "DD", "02",
-	"HH24", "15", "HH12", "03", "HH", "03",
-	"MI", "04", "SS", "05",
-	"AM", "PM", "PM", "PM", "am", "pm", "pm", "pm",
-	"TZ", "MST",
-)
-
-// toChar implements a common subset of Postgres to_char(ts, fmt).
+// toChar implements Postgres to_char(ts, fmt) via a token scanner over the
+// format string: it matches the longest known token at each position, honors an
+// "FM" prefix (suppress zero-padding / name-padding), and passes "double-quoted"
+// text through literally. Computed fields (day-of-year, quarter, ISO week,
+// Julian day, ...) are produced directly rather than mapped onto a Go layout.
 func toChar(t time.Time, format string) string {
-	return t.Format(pgToGoLayout.Replace(format))
+	var b strings.Builder
+	for i := 0; i < len(format); {
+		if format[i] == '"' { // quoted literal text
+			j := i + 1
+			for j < len(format) && format[j] != '"' {
+				b.WriteByte(format[j])
+				j++
+			}
+			i = j + 1
+			continue
+		}
+		fm := false
+		rest := format[i:]
+		if len(rest) >= 2 && (rest[0] == 'F' || rest[0] == 'f') && (rest[1] == 'M' || rest[1] == 'm') {
+			fm, rest = true, rest[2:]
+		}
+		if val, n := matchToCharToken(t, rest, fm); n > 0 {
+			b.WriteString(val)
+			i += n
+			if fm {
+				i += 2
+			}
+			continue
+		}
+		if fm { // "FM" not followed by a token: drop the modifier
+			i += 2
+			continue
+		}
+		b.WriteByte(format[i])
+		i++
+	}
+	return b.String()
+}
+
+// tcToken is one to_char format token and its producer.
+type tcToken struct {
+	tok string
+	f   func(t time.Time, fm bool) string
+}
+
+// tcTokens is ordered longest-first so e.g. "HH24" wins over "HH". Numeric
+// tokens are conventionally upper-case; the name tokens carry their own case.
+var tcTokens = []tcToken{
+	{"IYYY", func(t time.Time, fm bool) string { y, _ := t.ISOWeek(); return tcNum(fm, 4, y) }},
+	{"YYYY", func(t time.Time, fm bool) string { return tcNum(fm, 4, t.Year()) }},
+	{"HH24", func(t time.Time, fm bool) string { return tcNum(fm, 2, t.Hour()) }},
+	{"HH12", func(t time.Time, fm bool) string { return tcNum(fm, 2, tc12(t)) }},
+	{"MONTH", func(t time.Time, fm bool) string { return tcName(fm, strings.ToUpper(t.Month().String())) }},
+	{"Month", func(t time.Time, fm bool) string { return tcName(fm, t.Month().String()) }},
+	{"month", func(t time.Time, fm bool) string { return tcName(fm, strings.ToLower(t.Month().String())) }},
+	{"DDD", func(t time.Time, fm bool) string { return tcNum(fm, 3, t.YearDay()) }},
+	{"DAY", func(t time.Time, fm bool) string { return tcName(fm, strings.ToUpper(t.Weekday().String())) }},
+	{"Day", func(t time.Time, fm bool) string { return tcName(fm, t.Weekday().String()) }},
+	{"day", func(t time.Time, fm bool) string { return tcName(fm, strings.ToLower(t.Weekday().String())) }},
+	{"MON", func(t time.Time, fm bool) string { return strings.ToUpper(t.Month().String()[:3]) }},
+	{"Mon", func(t time.Time, fm bool) string { return t.Month().String()[:3] }},
+	{"mon", func(t time.Time, fm bool) string { return strings.ToLower(t.Month().String()[:3]) }},
+	{"YYY", func(t time.Time, fm bool) string { return tcLast(t.Year(), 3) }},
+	{"DY", func(t time.Time, fm bool) string { return strings.ToUpper(t.Weekday().String()[:3]) }},
+	{"Dy", func(t time.Time, fm bool) string { return t.Weekday().String()[:3] }},
+	{"dy", func(t time.Time, fm bool) string { return strings.ToLower(t.Weekday().String()[:3]) }},
+	{"YY", func(t time.Time, fm bool) string { return tcLast(t.Year(), 2) }},
+	{"MM", func(t time.Time, fm bool) string { return tcNum(fm, 2, int(t.Month())) }},
+	{"MI", func(t time.Time, fm bool) string { return tcNum(fm, 2, t.Minute()) }},
+	{"SS", func(t time.Time, fm bool) string { return tcNum(fm, 2, t.Second()) }},
+	{"MS", func(t time.Time, fm bool) string { return tcNum(fm, 3, t.Nanosecond()/1e6) }},
+	{"US", func(t time.Time, fm bool) string { return tcNum(fm, 6, t.Nanosecond()/1e3) }},
+	{"DD", func(t time.Time, fm bool) string { return tcNum(fm, 2, t.Day()) }},
+	{"HH", func(t time.Time, fm bool) string { return tcNum(fm, 2, tc12(t)) }},
+	{"WW", func(t time.Time, fm bool) string { return tcNum(fm, 2, (t.YearDay()-1)/7+1) }},
+	{"IW", func(t time.Time, fm bool) string { _, w := t.ISOWeek(); return tcNum(fm, 2, w) }},
+	{"CC", func(t time.Time, fm bool) string { return tcNum(fm, 2, (t.Year()+99)/100) }},
+	{"ID", func(t time.Time, fm bool) string { return strconv.Itoa(tcISODow(t)) }},
+	{"AM", func(t time.Time, fm bool) string { return tcMeridiem(t, true) }},
+	{"PM", func(t time.Time, fm bool) string { return tcMeridiem(t, true) }},
+	{"am", func(t time.Time, fm bool) string { return tcMeridiem(t, false) }},
+	{"pm", func(t time.Time, fm bool) string { return tcMeridiem(t, false) }},
+	{"TZ", func(t time.Time, fm bool) string { return t.Format("MST") }},
+	{"Q", func(t time.Time, fm bool) string { return strconv.Itoa((int(t.Month())-1)/3 + 1) }},
+	{"J", func(t time.Time, fm bool) string { return strconv.Itoa(julianDay(t)) }},
+	{"D", func(t time.Time, fm bool) string { return strconv.Itoa(int(t.Weekday()) + 1) }},
+	{"Y", func(t time.Time, fm bool) string { return tcLast(t.Year(), 1) }},
+}
+
+// tcNameCase are the tokens whose letter case is significant (month/day names
+// and meridiem). Numeric tokens match case-insensitively (YYYY == yyyy).
+var tcNameCase = map[string]bool{
+	"MONTH": true, "Month": true, "month": true,
+	"DAY": true, "Day": true, "day": true,
+	"MON": true, "Mon": true, "mon": true,
+	"DY": true, "Dy": true, "dy": true,
+	"AM": true, "PM": true, "am": true, "pm": true,
+}
+
+func matchToCharToken(t time.Time, s string, fm bool) (string, int) {
+	for _, e := range tcTokens {
+		n := len(e.tok)
+		if len(s) < n {
+			continue
+		}
+		seg := s[:n]
+		if tcNameCase[e.tok] {
+			if seg == e.tok {
+				return e.f(t, fm), n
+			}
+			continue
+		}
+		if strings.EqualFold(seg, e.tok) {
+			return e.f(t, fm), n
+		}
+	}
+	return "", 0
+}
+
+// tcNum zero-pads v to width, unless FM is set.
+func tcNum(fm bool, width, v int) string {
+	if fm {
+		return strconv.Itoa(v)
+	}
+	return fmt.Sprintf("%0*d", width, v)
+}
+
+// tcLast returns the last n digits of a (zero-padded) year.
+func tcLast(year, n int) string {
+	s := fmt.Sprintf("%04d", year)
+	if len(s) > n {
+		s = s[len(s)-n:]
+	}
+	return s
+}
+
+// tcName pads month/day names to 9 chars (Postgres default), unless FM.
+func tcName(fm bool, name string) string {
+	if fm || len(name) >= 9 {
+		return name
+	}
+	return name + strings.Repeat(" ", 9-len(name))
+}
+
+func tc12(t time.Time) int {
+	h := t.Hour() % 12
+	if h == 0 {
+		h = 12
+	}
+	return h
+}
+
+func tcMeridiem(t time.Time, upper bool) string {
+	s := "am"
+	if t.Hour() >= 12 {
+		s = "pm"
+	}
+	if upper {
+		return strings.ToUpper(s)
+	}
+	return s
+}
+
+// tcISODow returns the ISO day of week (Monday=1 .. Sunday=7).
+func tcISODow(t time.Time) int {
+	if d := int(t.Weekday()); d != 0 {
+		return d
+	}
+	return 7
+}
+
+// julianDay returns the Julian Day Number for t's date.
+func julianDay(t time.Time) int {
+	y, m, d := t.Year(), int(t.Month()), t.Day()
+	a := (14 - m) / 12
+	yy := y + 4800 - a
+	mm := m + 12*a - 3
+	return d + (153*mm+2)/5 + 365*yy + yy/4 - yy/100 + yy/400 - 32045
 }
 
 // scalar function adapters (driver.Value in/out).
