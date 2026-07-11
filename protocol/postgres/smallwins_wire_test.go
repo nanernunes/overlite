@@ -30,6 +30,24 @@ func TestNoOpUtilityStatements(t *testing.T) {
 	assert.Equal(t, 1, n)
 }
 
+func TestIntervalArithmetic(t *testing.T) {
+	conn := connect(t, startServer(t))
+	ctx := context.Background()
+
+	cases := []struct{ query, want string }{
+		{`SELECT '2020-01-15 10:00:00' + interval '2 hours'`, "2020-01-15 12:00:00"},
+		{`SELECT '2020-01-15' - interval '1 day'`, "2020-01-14 00:00:00"},
+		{`SELECT '2020-01-15' + interval '1 year 2 months'`, "2021-03-15 00:00:00"},
+		{`SELECT '2020-01-01' + interval '2 weeks'`, "2020-01-15 00:00:00"},
+		{`SELECT '2020-01-15 10:00:00' - interval '30 minutes'`, "2020-01-15 09:30:00"},
+	}
+	for _, c := range cases {
+		var got string
+		require.NoErrorf(t, conn.QueryRow(ctx, c.query).Scan(&got), "query %q", c.query)
+		assert.Equalf(t, c.want, got, "query %q", c.query)
+	}
+}
+
 func TestSavepoints(t *testing.T) {
 	conn := connect(t, startServer(t))
 	ctx := context.Background()

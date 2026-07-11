@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -16,6 +17,7 @@ func rewrite(sql string) string {
 	sql = rewriteDistinctOn(sql)
 	sql = rewriteSerial(sql)
 	sql = rewriteNow(sql)
+	sql = rewriteInterval(sql)
 	sql = rewriteExtract(sql)
 	sql = rewriteJSONFuncs(sql)
 	sql = rewriteJSONPath(sql)
@@ -314,6 +316,106 @@ func rewriteNow(sql string) string {
 	return mapOutsideStrings(sql, func(code string) string {
 		return reNowFuncs.ReplaceAllString(code, "datetime('now')")
 	})
+}
+
+// rewriteInterval turns "<ts> ± interval '<n unit ...>'" into SQLite's
+// datetime(<ts>, '±n unit', ...) form. Each interval component becomes one
+// datetime modifier; the operator's sign applies to all of them. A bare
+// interval literal (no +/- operand) is left untouched (SQLite has no interval
+// type; only the arithmetic form has an equivalent).
+func rewriteInterval(sql string) string {
+	low := strings.ToLower(sql)
+	for from := 0; ; {
+		i := strings.Index(low[from:], "interval")
+		if i < 0 {
+			return sql
+		}
+		i += from
+		from = i + len("interval")
+		if (i > 0 && isWordByte(low[i-1])) || (from < len(low) && isWordByte(low[from])) {
+			continue // part of a longer identifier
+		}
+		p := skipSpaces(sql, from)
+		if p >= len(sql) || sql[p] != '\'' {
+			continue
+		}
+		q := endOfStringLiteral(sql, p)
+		body := sql[p+1 : q-1]
+
+		o := i - 1
+		for o >= 0 && sql[o] == ' ' {
+			o--
+		}
+		if o < 0 || (sql[o] != '+' && sql[o] != '-') {
+			continue // not "<ts> ± interval ..."; leave it
+		}
+		mods := intervalModifiers(body, string(sql[o]))
+		if len(mods) == 0 {
+			continue
+		}
+		ls, le := operandBefore(sql, o)
+		if ls == le {
+			continue
+		}
+		repl := "datetime(" + strings.TrimSpace(sql[ls:le]) + ", " + strings.Join(mods, ", ") + ")"
+		sql = sql[:ls] + repl + sql[q:]
+		low = strings.ToLower(sql)
+		from = ls + len(repl)
+	}
+}
+
+// intervalModifiers turns an interval body ("1 day", "1 year 2 mons") into
+// SQLite datetime modifier literals ('+1 days', '+1 years', '+2 months'), each
+// carrying sign ("+" or "-").
+func intervalModifiers(body, sign string) []string {
+	toks := strings.Fields(body)
+	var mods []string
+	for i := 0; i+1 < len(toks); i += 2 {
+		unit := strings.ToLower(strings.TrimSuffix(toks[i+1], "s"))
+		mult := 1
+		switch unit {
+		case "year", "yr":
+			unit = "years"
+		case "mon", "month":
+			unit = "months"
+		case "day", "d":
+			unit = "days"
+		case "hour", "hr", "h":
+			unit = "hours"
+		case "min", "minute", "m":
+			unit = "minutes"
+		case "sec", "second":
+			unit = "seconds"
+		case "week", "wk", "w":
+			unit, mult = "days", 7
+		default:
+			unit += "s"
+		}
+		n := intervalSigned(sign, toks[i])
+		if mult != 1 {
+			if v, err := strconv.Atoi(n); err == nil {
+				n = strconv.Itoa(v * mult)
+			}
+		}
+		mods = append(mods, "'"+n+" "+unit+"'")
+	}
+	return mods
+}
+
+// intervalSigned combines the operator sign with any sign on the number.
+func intervalSigned(sign, n string) string {
+	neg := sign == "-"
+	switch {
+	case strings.HasPrefix(n, "-"):
+		neg = !neg
+		n = n[1:]
+	case strings.HasPrefix(n, "+"):
+		n = n[1:]
+	}
+	if neg {
+		return "-" + n
+	}
+	return "+" + n
 }
 
 // rewriteExtract turns "extract(field FROM ts)" into the date_part('field', ts)
