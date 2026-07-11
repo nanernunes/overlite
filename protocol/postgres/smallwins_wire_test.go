@@ -30,6 +30,60 @@ func TestNoOpUtilityStatements(t *testing.T) {
 	assert.Equal(t, 1, n)
 }
 
+// TestOuterJoins covers RIGHT/FULL OUTER JOIN, which recent SQLite runs
+// natively (pass-through).
+func TestOuterJoins(t *testing.T) {
+	conn := connect(t, startServer(t))
+	mustExec(t, conn, `CREATE TABLE a (id int)`)
+	mustExec(t, conn, `CREATE TABLE b (id int)`)
+	mustExec(t, conn, `INSERT INTO a VALUES (1),(2),(3)`)
+	mustExec(t, conn, `INSERT INTO b VALUES (2),(3),(4)`)
+
+	assert.Equal(t, []string{"2", "3", "4"}, queryColumn(t, conn,
+		`SELECT b.id::text FROM a RIGHT JOIN b ON a.id = b.id ORDER BY b.id`, 0))
+	assert.Equal(t, []string{"1", "2", "3", "4"}, queryColumn(t, conn,
+		`SELECT COALESCE(a.id, b.id)::text FROM a FULL OUTER JOIN b ON a.id = b.id ORDER BY 1`, 0))
+}
+
+func TestGenerateSeries(t *testing.T) {
+	conn := connect(t, startServer(t))
+
+	assert.Equal(t, []string{"1", "2", "3", "4", "5"}, queryColumn(t, conn,
+		`SELECT generate_series::text FROM generate_series(1, 5)`, 0))
+	// Step, including descending, and empty ranges.
+	assert.Equal(t, []string{"0", "2", "4", "6"}, queryColumn(t, conn,
+		`SELECT generate_series::text FROM generate_series(0, 6, 2)`, 0))
+	assert.Equal(t, []string{"5", "3", "1"}, queryColumn(t, conn,
+		`SELECT generate_series::text FROM generate_series(5, 1, -2)`, 0))
+	assert.Empty(t, queryColumn(t, conn,
+		`SELECT generate_series::text FROM generate_series(5, 1)`, 0))
+	// Usable with an alias and joined like a table.
+	assert.Equal(t, []string{"10", "20", "30"}, queryColumn(t, conn,
+		`SELECT (g * 10)::text FROM generate_series(1, 3) AS g`, 0))
+}
+
+func TestDistinctOn(t *testing.T) {
+	conn := connect(t, startServer(t))
+	mustExec(t, conn, `CREATE TABLE sales (region text, amount int, ts int)`)
+	mustExec(t, conn, `INSERT INTO sales VALUES
+		('west', 10, 1), ('west', 30, 2), ('east', 20, 1), ('east', 5, 3)`)
+
+	// Latest row per region (highest ts): DISTINCT ON (region) ... ORDER BY ts DESC.
+	rows, err := conn.Query(context.Background(),
+		`SELECT DISTINCT ON (region) region, amount FROM sales ORDER BY region, ts DESC`)
+	require.NoError(t, err)
+	defer rows.Close()
+	got := map[string]int64{}
+	for rows.Next() {
+		var r string
+		var a int64
+		require.NoError(t, rows.Scan(&r, &a))
+		got[r] = a
+	}
+	require.NoError(t, rows.Err())
+	assert.Equal(t, map[string]int64{"west": 30, "east": 5}, got)
+}
+
 var uuidRE = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 
 func TestUUIDTypeAndGenerators(t *testing.T) {

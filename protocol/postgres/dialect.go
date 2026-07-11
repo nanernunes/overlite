@@ -13,6 +13,7 @@ func rewrite(sql string) string {
 	// casts (e.g. "x::pg_catalog.regtype") reduce to a bare, castable type.
 	sql = rewritePgCatalogPrefix(sql)
 	sql = rewritePublicPrefix(sql)
+	sql = rewriteDistinctOn(sql)
 	sql = rewriteSerial(sql)
 	sql = rewriteNow(sql)
 	sql = rewriteExtract(sql)
@@ -643,11 +644,180 @@ func rewriteStringAgg(sql string) string {
 	})
 }
 
-// rewriteGenerateSeries replaces generate_series(...) — a set-returning
-// function SQLite's build lacks — with an empty single-column relation. It only
-// appears in catalog queries that yield no rows here, so emptiness is correct.
+// rewriteGenerateSeries turns generate_series(start, stop[, step]) — a
+// set-returning function SQLite's build lacks — into a recursive-CTE subquery
+// producing a "generate_series" column, so "FROM generate_series(1, 5)" yields
+// real rows. Non-numeric or unparsable forms fall back to an empty relation
+// (they appear only in catalog queries that yield no rows here).
 func rewriteGenerateSeries(sql string) string {
-	return replaceCall(sql, "generate_series", "(SELECT NULL AS value WHERE 0)")
+	low := strings.ToLower(sql)
+	for from := 0; ; {
+		i := indexWordCall(low, "generate_series", from)
+		if i < 0 {
+			return sql
+		}
+		open := i + len("generate_series")
+		for open < len(sql) && sql[open] == ' ' {
+			open++
+		}
+		args, end, ok := readParenArgs(sql, open)
+		if !ok {
+			return sql
+		}
+		col := genSeriesColName(sql, end)
+		var repl string
+		if parts := splitTopLevel(args); len(parts) >= 2 {
+			step := "1"
+			if len(parts) >= 3 {
+				step = strings.TrimSpace(parts[2])
+			}
+			repl = genSeriesCTE(strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]), step, col)
+		} else {
+			repl = "(SELECT NULL AS " + col + " WHERE 0)"
+		}
+		sql = sql[:i] + repl + sql[end:]
+		low = strings.ToLower(sql)
+		from = i + len(repl)
+	}
+}
+
+// rewriteDistinctOn turns "SELECT DISTINCT ON (e) cols FROM ... ORDER BY ..."
+// into a ROW_NUMBER() window over the ON expressions, keeping the first row per
+// group (SQLite has no DISTINCT ON). It handles the top-level SELECT with an
+// explicit column list; a "*" (or "t.*") select list is left unchanged (we
+// can't name the helper column to exclude it).
+func rewriteDistinctOn(sql string) string {
+	low := strings.ToLower(sql)
+	s := skipSpaces(sql, 0)
+	if !hasWordAt(low, s, "select") {
+		return sql
+	}
+	p := skipSpaces(sql, s+len("select"))
+	if !hasWordAt(low, p, "distinct") {
+		return sql
+	}
+	p = skipSpaces(sql, p+len("distinct"))
+	if !hasWordAt(low, p, "on") {
+		return sql
+	}
+	p = skipSpaces(sql, p+len("on"))
+	if p >= len(sql) || sql[p] != '(' {
+		return sql
+	}
+	onArgs, afterOn, ok := readParenArgs(sql, p)
+	if !ok {
+		return sql
+	}
+	fromIdx := indexTopLevelWord(sql, afterOn, "from")
+	if fromIdx < 0 {
+		return sql
+	}
+	selectList := strings.TrimSpace(sql[afterOn:fromIdx])
+	if selectList == "" || strings.Contains(selectList, "*") {
+		return sql // needs an explicit column list to drop the helper column
+	}
+
+	fromEtc, windowOrder, outerTail := sql[fromIdx:], "", ""
+	if obIdx := indexTopLevelWord(sql, fromIdx, "order"); obIdx >= 0 {
+		fromEtc = sql[fromIdx:obIdx]
+		outerTail = " " + strings.TrimSpace(sql[obIdx:])
+		by := skipSpaces(sql, obIdx+len("order"))
+		if hasWordAt(low, by, "by") {
+			by = skipSpaces(sql, by+len("by"))
+		}
+		endOrder := len(sql)
+		for _, kw := range []string{"limit", "offset"} {
+			if k := indexTopLevelWord(sql, by, kw); k >= 0 && k < endOrder {
+				endOrder = k
+			}
+		}
+		windowOrder = " ORDER BY " + strings.TrimSpace(sql[by:endOrder])
+	}
+
+	inner := "SELECT *, ROW_NUMBER() OVER (PARTITION BY " + strings.TrimSpace(onArgs) +
+		windowOrder + ") AS _ov_rn " + strings.TrimSpace(fromEtc)
+	return "SELECT " + selectList + " FROM (" + inner + ") AS _ov WHERE _ov_rn = 1" + outerTail
+}
+
+// indexTopLevelWord finds the first whole-word occurrence of word at paren depth
+// zero and outside string literals, at or after from; -1 if none.
+func indexTopLevelWord(sql string, from int, word string) int {
+	low := strings.ToLower(sql)
+	depth := 0
+	for i := from; i < len(sql); i++ {
+		switch sql[i] {
+		case '\'':
+			i = endOfStringLiteral(sql, i) - 1
+			continue
+		case '(':
+			depth++
+			continue
+		case ')':
+			if depth > 0 {
+				depth--
+			}
+			continue
+		}
+		if depth == 0 && (i == 0 || !isWordByte(low[i-1])) && hasWordAt(low, i, word) {
+			return i
+		}
+	}
+	return -1
+}
+
+// genSeriesCTE builds the recursive CTE for generate_series(start, stop, step).
+// The range guard works for both ascending (step>0) and descending (step<0),
+// and emits no rows when start is already past stop (matching Postgres). col is
+// the output column name (Postgres names it after any table alias).
+func genSeriesCTE(start, stop, step, col string) string {
+	inRange := func(v string) string {
+		return "(((" + step + ") > 0 AND " + v + " <= (" + stop + ")) OR " +
+			"((" + step + ") < 0 AND " + v + " >= (" + stop + ")))"
+	}
+	return "(WITH RECURSIVE _gs(value) AS (" +
+		"SELECT (" + start + ") WHERE " + inRange("("+start+")") +
+		" UNION ALL SELECT value + (" + step + ") FROM _gs WHERE " + inRange("value + ("+step+")") +
+		") SELECT value AS " + col + " FROM _gs)"
+}
+
+// genSeriesColName returns the column name for a generate_series result: the
+// table alias that follows the call (Postgres renames the single output column
+// to it), a column alias in "alias(col)", or "generate_series" if none.
+func genSeriesColName(sql string, pos int) string {
+	low := strings.ToLower(sql)
+	p := skipSpaces(sql, pos)
+	if hasWordAt(low, p, "as") {
+		p = skipSpaces(sql, p+len("as"))
+	}
+	start := p
+	for p < len(sql) && isWordByte(sql[p]) {
+		p++
+	}
+	if p == start {
+		return "generate_series"
+	}
+	alias := sql[start:p]
+	if q := skipSpaces(sql, p); q < len(sql) && sql[q] == '(' {
+		if inner, _, ok := readParenArgs(sql, q); ok && strings.TrimSpace(inner) != "" {
+			return strings.TrimSpace(inner)
+		}
+	}
+	if isAliasKeyword(strings.ToLower(alias)) {
+		return "generate_series"
+	}
+	return alias
+}
+
+// isAliasKeyword reports whether w is a SQL keyword that can follow a FROM item
+// (so it is not an alias).
+func isAliasKeyword(w string) bool {
+	switch w {
+	case "as", "on", "where", "group", "order", "having", "limit", "offset",
+		"join", "inner", "left", "right", "full", "cross", "natural", "using",
+		"union", "except", "intersect", "and", "or", "window", "returning":
+		return true
+	}
+	return false
 }
 
 // replaceCall replaces every call name(...) — with balanced parentheses — by
