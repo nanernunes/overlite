@@ -206,7 +206,9 @@ These run so migrations, ORMs, and dumps proceed, but have no real effect:
 - **`LISTEN` / `UNLISTEN` / `NOTIFY`** — no message delivery.
 - **`SET`/`BEGIN ISOLATION LEVEL`** — SQLite serializes writes; levels have no
   effect.
-- **`ALTER … OWNER TO`, `ALTER SCHEMA`** — ownership isn't modeled.
+- **`ALTER … OWNER TO`, `ALTER SCHEMA`** — the creating role owns its tables
+  (and that drives privilege/RLS bypass), but *reassigning* an object's owner
+  isn't honored.
 
 ### Partial (works, with caveats)
 
@@ -221,27 +223,18 @@ These run so migrations, ORMs, and dumps proceed, but have no real effect:
   (superusers unrestricted; `SET SESSION AUTHORIZATION` is superuser-only).
   `CREATE`/`ALTER`/`DROP ROLE` require `CREATEROLE`, and membership can be
   granted on only by a superuser or a holder of `ADMIN OPTION` (which the
-  creator gets automatically, and `WITH ADMIN OPTION` delegates). Not
-  modeled: column-level privileges, `GRANT` on schemas/sequences/functions,
-  and the other role attributes (`SUPERUSER`, `CREATEDB`, …) beyond
+  creator gets automatically, and `WITH ADMIN OPTION` delegates).
+  **Row-level security is fully enforced**: `ALTER TABLE … ENABLE`/`FORCE ROW
+  LEVEL SECURITY` and `CREATE POLICY … USING (…) [WITH CHECK (…)]` filter
+  `SELECT`/`UPDATE`/`DELETE` and validate every `INSERT` form (`VALUES`, bound
+  params, `SELECT` with its source read-filtered, `DEFAULT VALUES`, and
+  `ON CONFLICT` DO NOTHING/DO UPDATE), with permissive/restrictive combining,
+  default-deny, and owner/superuser/`BYPASSRLS` bypass. Not modeled:
+  column-level privileges, `GRANT` on schemas/sequences/functions, and the
+  other role attributes (`SUPERUSER`, `CREATEDB`, …) beyond
   `INHERIT`/`CREATEROLE`/`BYPASSRLS`. Superusers and roles that were never
   `CREATE ROLE`'d bypass the checks, so existing single-user setups are
   unaffected.
-- **Row-level security** — `ALTER TABLE … ENABLE`/`FORCE ROW LEVEL SECURITY`
-  plus `CREATE POLICY … USING (…) [WITH CHECK (…)]`. `USING` filters `SELECT`
-  (tables in `FROM`/`JOIN` are wrapped in a filtering subquery) and limits which
-  rows `UPDATE`/`DELETE` touch; `WITH CHECK` (falling back to `USING`) validates
-  `INSERT`. Permissive policies OR together, restrictive ones AND, and RLS with
-  no permissive policy is default-deny. The owner (unless `FORCE`), superusers,
-  and `BYPASSRLS` roles are exempt. Parameterized inserts (`VALUES ($1, …)`),
-  `INSERT … RETURNING`, and `INSERT … SELECT` are all checked — the bound params
-  are replayed into the validation, RETURNING is stripped for it, and the source
-  query is validated row-by-row. `INSERT … ON CONFLICT` upserts are checked too:
-  DO NOTHING on its insert source, DO UPDATE on the final post-update rows (run
-  in a savepoint that rolls back if any row would violate the UPDATE policy). The
-  read side of an `INSERT … SELECT` is RLS-filtered too, so only rows the role
-  may see are copied, and `INSERT … DEFAULT VALUES` validates its all-defaults
-  row.
 - **Enum columns** — enforced via `TEXT` + `CHECK` and `\dT+` lists the
   elements, but there's no enum ordering/comparison.
 - **Composite types** — `CREATE TYPE … AS (…)` shows in `pg_type`/`\dT`, but the
