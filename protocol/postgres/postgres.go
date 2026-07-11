@@ -15,12 +15,14 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"strconv"
 	"strings"
 
 	"overlite/core"
+	"overlite/hba"
 )
 
 // Protocol is the PostgreSQL wire protocol implementation.
@@ -32,18 +34,38 @@ type Protocol struct {
 	// tls, when non-nil, lets clients upgrade the connection with SSL.
 	tls *tls.Config
 	// configuredAuth is POSTGRES_HOST_AUTH_METHOD (trust/password/md5/
-	// scram-sha-256); empty means the default (md5 when a password is set).
+	// scram-sha-256); empty means the default (scram when a password is set).
 	configuredAuth string
+	// hba, when non-nil, is a pg_hba policy that decides the auth method (and
+	// rejections) per connection, overriding configuredAuth.
+	hba *hba.Policy
 }
 
 // New returns a ready-to-use Postgres protocol, honoring POSTGRES_PASSWORD,
-// POSTGRES_HOST_AUTH_METHOD, and the TLS environment (see loadTLS).
+// POSTGRES_HOST_AUTH_METHOD, the TLS environment (see loadTLS), and a pg_hba
+// policy from OVERLITE_HBA_DIR (default ".").
 func New() *Protocol {
 	return &Protocol{
 		password:       os.Getenv("POSTGRES_PASSWORD"),
 		tls:            loadTLS(),
 		configuredAuth: os.Getenv("POSTGRES_HOST_AUTH_METHOD"),
+		hba:            loadHBA(),
 	}
+}
+
+// loadHBA reads the HBA policy from OVERLITE_HBA_DIR (default the working
+// directory); a parse error is logged and treated as "no policy".
+func loadHBA() *hba.Policy {
+	dir := os.Getenv("OVERLITE_HBA_DIR")
+	if dir == "" {
+		dir = "."
+	}
+	policy, err := hba.Load(dir)
+	if err != nil {
+		log.Printf("overlite: ignoring pg_hba in %s: %v", dir, err)
+		return nil
+	}
+	return policy
 }
 
 func (p *Protocol) Name() string { return "postgres" }
@@ -64,7 +86,7 @@ func (p *Protocol) Serve(ctx context.Context, conn net.Conn, engine core.Engine)
 		cancelBackend(cancelReq.pid, cancelReq.secret)
 		return nil
 	}
-	if err := p.authenticate(c, params["user"]); err != nil {
+	if err := p.authenticate(c, params["user"], params["database"], clientIP(conn), c.secured); err != nil {
 		return err
 	}
 
@@ -111,9 +133,15 @@ func (p *Protocol) authMethod() string {
 	}
 }
 
-// authenticate runs the resolved auth method against the client.
-func (p *Protocol) authenticate(c *wireConn, user string) error {
-	switch p.authMethod() {
+// authenticate runs the auth method resolved for this connection against the
+// client (the pg_hba policy decides when configured, else the global method).
+func (p *Protocol) authenticate(c *wireConn, user, db string, ip net.IP, ssl bool) error {
+	switch p.resolveMethod(user, db, ip, ssl) {
+	case "reject":
+		_ = c.sendFatal("28000",
+			fmt.Sprintf("no pg_hba.conf entry for user %q, database %q", user, db))
+		_ = c.flush()
+		return fmt.Errorf("connection rejected by pg_hba: user=%s db=%s", user, db)
 	case "trust":
 		return nil
 	case "password":
@@ -123,6 +151,45 @@ func (p *Protocol) authenticate(c *wireConn, user string) error {
 	default:
 		return p.authSCRAM(c, user)
 	}
+}
+
+// resolveMethod returns the effective auth method for a connection: from the
+// pg_hba policy when configured (rejecting unmatched connections), otherwise the
+// global POSTGRES_HOST_AUTH_METHOD-derived method.
+func (p *Protocol) resolveMethod(user, db string, ip net.IP, ssl bool) string {
+	if p.hba == nil {
+		return p.authMethod()
+	}
+	m, ok := p.hba.Method(hba.Conn{Local: ip == nil, SSL: ssl, Database: db, User: user, IP: ip})
+	if !ok {
+		return "reject"
+	}
+	return normalizeHBAMethod(m)
+}
+
+// normalizeHBAMethod maps a pg_hba method name to one overlite implements. Peer/
+// cert are accepted without their (unsupported) verification; external methods
+// (ldap/gss/…) require a password, so they fall back to scram.
+func normalizeHBAMethod(m string) string {
+	switch strings.ToLower(m) {
+	case "trust", "reject", "md5", "password":
+		return strings.ToLower(m)
+	case "scram-sha-256", "scram":
+		return "scram"
+	case "peer", "cert":
+		return "trust"
+	default:
+		return "scram"
+	}
+}
+
+// clientIP extracts the client's IP from a TCP connection, or nil for a local
+// (Unix-socket) connection.
+func clientIP(conn net.Conn) net.IP {
+	if a, ok := conn.RemoteAddr().(*net.TCPAddr); ok {
+		return a.IP
+	}
+	return nil
 }
 
 // authFailed reports the standard auth failure to the client.

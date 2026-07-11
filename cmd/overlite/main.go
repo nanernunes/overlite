@@ -111,6 +111,15 @@ func currentUser() string {
 }
 
 func authMode() string {
+	dir := os.Getenv("OVERLITE_HBA_DIR")
+	if dir == "" {
+		dir = "."
+	}
+	for _, name := range []string{"pg_hba.conf", "pg_hba.yaml", "pg_hba.yml"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+			return "pg_hba (" + name + ")"
+		}
+	}
 	if os.Getenv("POSTGRES_PASSWORD") == "" {
 		return "trust"
 	}

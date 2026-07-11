@@ -52,6 +52,7 @@ container setups.
 | — | `POSTGRES_PASSWORD` | *(unset)* | when set, requires password auth (else trust) |
 | — | `POSTGRES_SSL` | *(unset)* | `on` enables TLS with a self-signed cert (clients use `sslmode=require`) |
 | — | `POSTGRES_SSL_CERT` / `POSTGRES_SSL_KEY` | *(unset)* | PEM cert/key to serve instead of self-signed |
+| — | `OVERLITE_HBA_DIR` | `.` | directory holding `pg_hba.conf` and/or `pg_hba.yaml` (see below); overrides the global auth method |
 
 The port belongs to the driver — postgres defaults to 5432 — and is only
 overridden if you set `<DRIVER>_PORT` (e.g. `POSTGRES_PORT`).
@@ -60,6 +61,32 @@ overridden if you set `<DRIVER>_PORT` (e.g. `POSTGRES_PORT`).
 POSTGRES_PASSWORD=secret POSTGRES_PORT=5544 ./bin/overlite --db shop.db
 # -> database "shop", user "postgres", password auth, on :5544
 ```
+
+## Host-based auth (`pg_hba`)
+
+Drop a `pg_hba.conf` (classic Postgres format) or a `pg_hba.yaml` into
+`OVERLITE_HBA_DIR` to decide the auth method — or a rejection — per connection,
+by type / database / user / client CIDR. Rules are evaluated top-to-bottom;
+**the first match wins**, and an unmatched connection is refused (as Postgres
+does). If both files are present, `pg_hba.conf` takes precedence.
+
+```conf
+# TYPE  DATABASE  USER   ADDRESS         METHOD
+host    all       all    127.0.0.1/32    trust
+hostssl shop      app    10.0.0.0/8      scram-sha-256
+host    all       all    0.0.0.0/0       reject
+```
+
+```yaml
+hba:
+  - { type: host,    database: all,  user: all, address: 127.0.0.1/32, method: trust }
+  - { type: hostssl, database: shop, user: app, address: 10.0.0.0/8,   method: scram-sha-256 }
+  - { type: host,    database: all,  user: all, address: 0.0.0.0/0,     method: reject }
+```
+
+Methods `trust`, `reject`, `scram-sha-256`, `md5`, and `password` are enforced;
+`peer`/`cert` are accepted without their verification. The password checked is
+still the single `POSTGRES_PASSWORD` (per-role passwords aren't stored yet).
 
 ## Schemas map to files
 
@@ -91,7 +118,7 @@ for a real production system**. ✅ done · 🟡 partial · ⬜ not yet.
 | JSON | ✅ | `->` `->>` `#>` `#>>` and the `json1` functions |
 | COPY / bulk load | ✅ | `FROM STDIN` / `TO STDOUT`, `\copy` (text & CSV) |
 | Introspection | ✅ | `pg_catalog` + `information_schema` (psql `\dt`/`\d`/`\l`, GUIs) |
-| Authentication | ✅ | trust, `POSTGRES_PASSWORD` with SCRAM-SHA-256 (default), md5, or cleartext via `POSTGRES_HOST_AUTH_METHOD`; TLS |
+| Authentication | ✅ | trust, `POSTGRES_PASSWORD` with SCRAM-SHA-256 (default)/md5/cleartext, TLS, and per-connection `pg_hba` (conf or YAML) |
 | Concurrency | ✅ | dedicated connection per client; reads run in parallel, writes serialize (SQLite single-writer) |
 | Migrations (`ALTER TABLE`) | 🟡 | add/drop/rename column; no `ALTER COLUMN TYPE` / `ADD CONSTRAINT` |
 | Numeric precision | 🟡 | SQLite affinity; not exact fixed-point (money) |
@@ -145,7 +172,6 @@ These would require emulating features SQLite fundamentally lacks:
 
 - **`CREATE TYPE`** range / base types (`… AS ENUM` is modeled and `… AS
   (composite)` is recorded in the catalog; range/base are accepted as a no-op).
-- **Multiple users / `pg_hba`-style** host rules (one configured role/password).
 - **Remainder of `pg_catalog`** (`pg_depend`, `pg_statistic`, …) — present but
   empty.
 - No `LISTEN`/`NOTIFY` delivery, and no replication / HA.
@@ -165,6 +191,9 @@ These run so migrations, ORMs, and dumps proceed, but have no real effect:
 
 ### Partial (works, with caveats)
 
+- **`pg_hba`** — rules (conf **or** YAML) select the auth method and reject
+  per connection, but the password verified is the single `POSTGRES_PASSWORD`
+  (no per-role passwords yet).
 - **Roles** — `CREATE`/`ALTER`/`DROP ROLE`/`USER` show up in `\du`, but
   attributes aren't enforced.
 - **Enum columns** — enforced via `TEXT` + `CHECK` and `\dT+` lists the

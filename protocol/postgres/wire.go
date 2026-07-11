@@ -60,9 +60,10 @@ var byteOrder = binary.BigEndian
 // wireConn wraps a raw connection with buffered framed I/O for the Postgres
 // protocol.
 type wireConn struct {
-	raw net.Conn
-	r   *bufio.Reader
-	w   *bufio.Writer
+	raw     net.Conn
+	r       *bufio.Reader
+	w       *bufio.Writer
+	secured bool // the connection was upgraded to TLS
 }
 
 func newWireConn(c net.Conn) *wireConn {
@@ -136,6 +137,7 @@ func (c *wireConn) upgradeTLS(cfg *tls.Config) error {
 	c.raw = tconn
 	c.r = bufio.NewReader(tconn)
 	c.w = bufio.NewWriter(tconn)
+	c.secured = true
 	return nil
 }
 
