@@ -30,6 +30,31 @@ func TestNoOpUtilityStatements(t *testing.T) {
 	assert.Equal(t, 1, n)
 }
 
+func TestAlterTable(t *testing.T) {
+	conn := connect(t, startServer(t))
+	mustExec(t, conn, `CREATE TABLE t (id int, name text)`)
+	mustExec(t, conn, `ALTER TABLE t ADD COLUMN email text`)
+	mustExec(t, conn, `ALTER TABLE t RENAME COLUMN name TO full_name`)
+	mustExec(t, conn, `ALTER TABLE t DROP COLUMN email`)
+	mustExec(t, conn, `ALTER TABLE t RENAME TO people`)
+
+	assert.Equal(t, []string{"id", "full_name"}, queryColumn(t, conn,
+		`SELECT column_name FROM information_schema.columns
+		 WHERE table_name = 'people' ORDER BY ordinal_position`, 0))
+}
+
+func TestIsolationLevelStatements(t *testing.T) {
+	conn := connect(t, startServer(t))
+	ctx := context.Background()
+	// Accepted (no real effect): SQLite serializes writes anyway.
+	mustExec(t, conn, `SET default_transaction_isolation = 'serializable'`)
+	tx, err := conn.Begin(ctx) // pgx BEGIN
+	require.NoError(t, err)
+	_, err = tx.Exec(ctx, `SET TRANSACTION ISOLATION LEVEL SERIALIZABLE`)
+	require.NoError(t, err)
+	require.NoError(t, tx.Rollback(ctx))
+}
+
 func TestBooleanType(t *testing.T) {
 	conn := connect(t, startServer(t))
 	ctx := context.Background()
