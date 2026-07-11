@@ -257,6 +257,133 @@ func rewriteArrayCastDrop(sql string) string {
 	return b.String()
 }
 
+// rewriteAnyArrayExpr maps `x = ANY(arr)` / `x <> ALL(arr)` onto a json_each
+// membership subquery over the JSON-array storage, for a non-literal array
+// operand (literal ARRAY[…] is handled earlier by rewriteAnyArray).
+func rewriteAnyArrayExpr(sql string) string {
+	from := 0
+	for {
+		low := strings.ToLower(sql)
+		idx, word := -1, ""
+		if ia := indexWordCall(low, "any", from); ia >= 0 {
+			idx, word = ia, "any"
+		}
+		if il := indexWordCall(low, "all", from); il >= 0 && (idx < 0 || il < idx) {
+			idx, word = il, "all"
+		}
+		if idx < 0 {
+			return sql
+		}
+		open := idx + len(word)
+		for open < len(sql) && sql[open] == ' ' {
+			open++
+		}
+		arg, end, ok := readParenArgs(sql, open)
+		if !ok {
+			from = idx + len(word)
+			continue
+		}
+		// A real subquery operand stays an IN (…) (handled by rewriteAnyOperator);
+		// only an array-valued operand becomes a json_each membership.
+		if at := strings.ToLower(strings.TrimSpace(arg)); strings.HasPrefix(at, "select") ||
+			strings.HasPrefix(at, "(select") || strings.HasPrefix(at, "values") {
+			from = idx + len(word)
+			continue
+		}
+		// The comparison operator just before ANY/ALL.
+		j := idx - 1
+		for j >= 0 && (sql[j] == ' ' || sql[j] == '\t') {
+			j--
+		}
+		oe := j + 1
+		for j >= 0 && strings.IndexByte("=<>!", sql[j]) >= 0 {
+			j--
+		}
+		op := sql[j+1 : oe]
+		if !((word == "any" && op == "=") || (word == "all" && (op == "<>" || op == "!="))) {
+			from = idx + len(word)
+			continue
+		}
+		repl := "IN"
+		if word == "all" {
+			repl = "NOT IN"
+		}
+		// Guard with json_valid so a non-JSON operand (e.g. a catalog column that
+		// isn't a real array) yields an empty set instead of a "malformed JSON"
+		// error — matching the old IN(NULL) no-match behavior.
+		a := strings.TrimSpace(arg)
+		newExpr := " " + repl + " (SELECT value FROM json_each(CASE WHEN json_valid(" + a + ") THEN " + a + " END))"
+		sql = sql[:j+1] + newExpr + sql[end:]
+		from = j + 1 + len(newExpr)
+	}
+}
+
+// rewriteUnnestSelect turns `SELECT … unnest(arr) … FROM tref …` into a
+// json_each cross join: the set-returning unnest in the target list moves to the
+// FROM clause (SQLite can't return a set from the SELECT list). Handles a single
+// unnest over a query with a FROM clause; other shapes fall through to
+// rewriteUnnest.
+func rewriteUnnestSelect(sql string) string {
+	if !strings.EqualFold(firstWordUpper(sql), "SELECT") {
+		return sql
+	}
+	low := strings.ToLower(sql)
+	fromIdx := topLevelKeyword(sql, "from")
+	if fromIdx < 0 {
+		return sql
+	}
+	ui := indexWordCall(low[:fromIdx], "unnest", 0)
+	if ui < 0 {
+		return sql
+	}
+	// Only a top-level unnest in the target list is moved to FROM; one nested in
+	// a subquery/parens (e.g. array(select … from unnest(x))) is left to
+	// rewriteUnnest.
+	if parenDepthAt(sql, ui) != 0 {
+		return sql
+	}
+	open := ui + len("unnest")
+	for open < fromIdx && sql[open] == ' ' {
+		open++
+	}
+	arg, end, ok := readParenArgs(sql, open)
+	if !ok || end > fromIdx {
+		return sql
+	}
+	// End of the FROM clause: the next top-level clause keyword, or end.
+	rest := sql[fromIdx:]
+	cut := len(rest)
+	for _, kw := range []string{"where", "group", "having", "order", "limit", "union", "except", "intersect"} {
+		if p := topLevelKeyword(rest, kw); p > len("from") && p < cut {
+			cut = p
+		}
+	}
+	a := strings.TrimSpace(arg)
+	return sql[:ui] + "_u.value" + sql[end:fromIdx] +
+		rest[:cut] + ", json_each(CASE WHEN json_valid(" + a + ") THEN " + a + " END) _u " + rest[cut:]
+}
+
+// parenDepthAt returns the parenthesis nesting depth at position pos, ignoring
+// parens inside string literals.
+func parenDepthAt(sql string, pos int) int {
+	depth := 0
+	for i := 0; i < pos && i < len(sql); {
+		switch sql[i] {
+		case '\'':
+			i = endOfStringLiteral(sql, i)
+			continue
+		case '(':
+			depth++
+		case ')':
+			if depth > 0 {
+				depth--
+			}
+		}
+		i++
+	}
+	return depth
+}
+
 // pgArrayLitToJSON converts a Postgres array literal body ("{a,b}") into a JSON
 // array, quoting elements for non-numeric element types.
 func pgArrayLitToJSON(inner, elem string) string {

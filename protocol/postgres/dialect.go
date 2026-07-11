@@ -27,16 +27,18 @@ func rewrite(sql string) string {
 	sql = rewriteOperatorSyntax(sql)        // unwrap OPERATOR(=)/OPERATOR(~) before ANY/regex handling
 	sql = rewriteArrayToStringSubquery(sql) // before ARRAY(subquery) is unwrapped
 	sql = rewriteArraySubquery(sql)
-	sql = rewriteAnyArray(sql)
+	sql = rewriteAnyArray(sql)     // literal "= ANY(ARRAY[…])" -> IN (…)
+	sql = rewriteAnyArrayExpr(sql) // x = ANY(arr) -> json_each membership (before generic ANY)
 	sql = rewriteAnyOperator(sql)
 	sql = rewriteStringAgg(sql)
 	sql = rewriteGenerateSeries(sql)
 	sql = rewritePgOptionsToTable(sql)
-	sql = rewriteUnnest(sql)
+	sql = rewriteUnnestSelect(sql) // SELECT unnest(arr) FROM t -> json_each cross join
+	sql = rewriteUnnest(sql)       // must see raw '{…}'::t[] for pg_dump's bulk fetch
 	sql = rewritePartitionSRF(sql)
 	sql = rewriteArrayLiteral(sql)  // ARRAY[…] -> json_array(…)
-	sql = rewriteArrayCast(sql)     // '{…}'::type[] -> JSON literal
-	sql = rewriteArrayCastDrop(sql) // expr::type[] -> expr (value already JSON); before casts
+	sql = rewriteArrayCast(sql)     // '{…}'::type[] -> JSON literal (after unnest)
+	sql = rewriteArrayCastDrop(sql) // expr::type[] -> expr (value already JSON)
 	sql = rewriteCasts(sql)
 	sql = rewriteJSONContains(sql) // after casts, so "x::jsonb @> ..." operands are whole
 	sql = rewriteArraySubscript(sql)
@@ -754,12 +756,20 @@ func rewriteAnyOperator(sql string) string {
 // only in catalog queries that never evaluate here, so we collapse them to
 // NULL. Requiring no space before "[" avoids touching SQLite's [ident] quoting.
 // Non-empty brackets only: `x[1]` is a subscript, but `text[]` is an array-type
-// declaration and must be left alone.
-var reArraySubscript = regexp.MustCompile(`[A-Za-z_]\w*\[[^\]]+\]`)
+// declaration and must be left alone. Captures the array expr and the index.
+var reArraySubscript = regexp.MustCompile(`([A-Za-z_]\w*)\[([^\]]+)\]`)
 
+// rewriteArraySubscript maps `arr[i]` (1-based) onto json_extract over the
+// JSON-array storage, guarded by json_valid so a non-array/NULL value (and any
+// catalog column that isn't JSON) yields NULL, as before.
 func rewriteArraySubscript(sql string) string {
 	return mapOutsideStrings(sql, func(code string) string {
-		return reArraySubscript.ReplaceAllString(code, "NULL")
+		return reArraySubscript.ReplaceAllStringFunc(code, func(m string) string {
+			sm := reArraySubscript.FindStringSubmatch(m)
+			arr, idx := sm[1], sm[2]
+			return "CASE WHEN json_valid(" + arr + ") THEN json_extract(" + arr +
+				", '$[' || ((" + idx + ")-1) || ']') END"
+		})
 	})
 }
 

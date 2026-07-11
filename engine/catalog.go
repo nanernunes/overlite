@@ -141,12 +141,40 @@ var registerCatalog = sync.OnceFunc(func() {
 		scalar(name, -1, func([]driver.Value) (driver.Value, error) { return "", nil })
 	}
 	for _, name := range []string{
-		"array_upper", "array_lower", "array_length", "array_ndims",
-		"array_remove", "array_cat", "array_append", "array_prepend",
-		"array_position", "array_positions", "array_replace",
+		"array_ndims", "array_remove", "array_cat", "array_append",
+		"array_prepend", "array_position", "array_positions", "array_replace",
 	} {
 		scalar(name, -1, func([]driver.Value) (driver.Value, error) { return nil, nil })
 	}
+	// Length over the JSON-array storage. array_length/array_upper of an empty
+	// array are NULL (Postgres semantics); cardinality is 0.
+	arrLen := func(args []driver.Value) (driver.Value, error) {
+		if len(args) == 0 {
+			return nil, nil
+		}
+		if n, ok := jsonArrayLen(args[0]); ok && n > 0 {
+			return n, nil
+		}
+		return nil, nil
+	}
+	scalar("array_length", -1, arrLen)
+	scalar("array_upper", -1, arrLen)
+	scalar("array_lower", -1, func(args []driver.Value) (driver.Value, error) {
+		if len(args) > 0 {
+			if n, ok := jsonArrayLen(args[0]); ok && n > 0 {
+				return int64(1), nil
+			}
+		}
+		return nil, nil
+	})
+	scalar("cardinality", 1, func(args []driver.Value) (driver.Value, error) {
+		if len(args) > 0 {
+			if n, ok := jsonArrayLen(args[0]); ok {
+				return n, nil
+			}
+		}
+		return int64(0), nil
+	})
 	// array_agg is a real aggregate (pg_dump collects index/constraint columns
 	// with it); it builds a Postgres array literal {a,b,c}.
 	sqlite.MustRegisterFunction("array_agg", &sqlite.FunctionImpl{
