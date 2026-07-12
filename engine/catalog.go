@@ -173,6 +173,9 @@ var registerCatalog = sync.OnceFunc(func() {
 	} {
 		scalar(name, -1, func([]driver.Value) (driver.Value, error) { return "", nil })
 	}
+	// pg_get_function_sqlbody returns NULL so pg_dump emits the classic
+	// AS $$ prosrc $$ form (SQL-standard bodies aren't stored).
+	scalar("pg_get_function_sqlbody", -1, func([]driver.Value) (driver.Value, error) { return nil, nil })
 	// pg_get_triggerdef renders a trigger's CREATE statement (from the registry
 	// refreshed per connection); the first argument is the trigger oid.
 	scalar("pg_get_triggerdef", -1, func(args []driver.Value) (driver.Value, error) {
@@ -945,11 +948,15 @@ func pgProcView() string {
 		` NULL AS proallargtypes, 0 AS prosecdef, NULL AS proconfig, 100 AS procost,` +
 		` 0 AS prorows, 0 AS provariadic, 0 AS prosupport, 0 AS proleakproof,` +
 		` 's' AS proparallel, NULL AS proargdefaults, 0 AS pronargdefaults, '' AS prosqlbody,` +
-		` 1255 AS tableoid`
+		` NULL AS protrftypes, 1255 AS tableoid`
 	parts := make([]string, len(catalogFunctionNames))
 	for i, name := range catalogFunctionNames {
 		parts[i] = fmt.Sprintf(row, 100000+i, sqlQuote(name))
 	}
+	// User-defined LANGUAGE sql functions are executed by inlining but are NOT
+	// added to pg_proc here: pg_dump enumerates dumpable functions from pg_proc
+	// and its per-function detail query needs catalog support we don't have yet,
+	// so listing them would break `pg_dump`. \df of user functions is deferred.
 	return "CREATE TEMP VIEW pg_proc AS " + strings.Join(parts, " UNION ALL ")
 }
 

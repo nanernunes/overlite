@@ -240,6 +240,10 @@ func setupConnection(ctx context.Context, exec func(string) error, query func(st
 	if err := exec(commentsTableDDL); err != nil {
 		return err
 	}
+	// LANGUAGE sql function definitions (inlined at call sites).
+	if err := exec(functionsTableDDL); err != nil {
+		return err
+	}
 	// The internal privilege tables (GRANT/REVOKE storage + table ownership),
 	// consulted by the protocol before running a statement.
 	if err := exec(grantsTableDDL); err != nil {
@@ -273,6 +277,11 @@ func setupConnection(ctx context.Context, exec func(string) error, query func(st
 	// Refresh the global enum oid->name registry that format_type() reads.
 	if names, err := query("SELECT (rowid + 90000000) || ':' || typname FROM _overlite_enum_types"); err == nil {
 		refreshEnumNames(names)
+	}
+	// Refresh the LANGUAGE sql function cache (columns joined by char(30)).
+	if rows, err := query("SELECT name || char(30) || arity || char(30) || params || char(30) || body || char(30) || lang" +
+		" FROM _overlite_functions"); err == nil {
+		refreshFunctionsFromRows(rows)
 	}
 	// Refresh the trigger oid->definition registry that pg_get_triggerdef() reads
 	// (public schema; oid matches the pg_trigger view).

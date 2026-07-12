@@ -55,14 +55,15 @@ func interceptUtility(sql string) (*core.ResultSet, bool) {
 		if secondWordUpper(sql) == "EXTENSION" {
 			return &core.ResultSet{Command: w + " EXTENSION"}, true
 		}
-		// CREATE/DROP FUNCTION/PROCEDURE/AGGREGATE: SQLite has no stored routines
-		// (no PL/pgSQL engine), but accept the DDL so migrations that define them
-		// proceed. The body isn't executed. The keyword is one of the leading
-		// words (e.g. CREATE OR REPLACE FUNCTION), never a column name.
+		// CREATE/DROP PROCEDURE/AGGREGATE: SQLite has no stored routines, but
+		// accept the DDL so migrations proceed. FUNCTION is NOT here: it reaches
+		// the engine, which executes LANGUAGE sql bodies (by inlining) and no-ops
+		// other languages. The keyword is one of the leading words (e.g. CREATE OR
+		// REPLACE FUNCTION), never a column name.
 		lead := strings.Fields(strings.ToUpper(sql))
 		for i := 1; i < len(lead) && i < 4; i++ {
 			switch lead[i] {
-			case "FUNCTION", "PROCEDURE", "AGGREGATE":
+			case "PROCEDURE", "AGGREGATE":
 				return &core.ResultSet{Command: w + " " + lead[i]}, true
 			}
 		}
