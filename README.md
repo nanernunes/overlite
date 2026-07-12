@@ -90,19 +90,27 @@ against **its own password** — `CREATE ROLE alice LOGIN PASSWORD 'x'` stores a
 SCRAM verifier (never plaintext), and roles without one fall back to
 `POSTGRES_PASSWORD`.
 
-## Schemas map to files
+## Schemas
 
-The file you point at is the `public` schema. Creating a schema creates a
-sibling file, and pointing at a database re-discovers them automatically:
+By default all schemas live in the one file — the file you point at is the
+`public` schema, and other schemas are name-prefixed tables in it:
 
 ```sql
-CREATE SCHEMA sales;            -- creates shop.sales.db, attaches it
+CREATE SCHEMA sales;            -- ordinary write (works inside a transaction)
 CREATE TABLE sales.orders (...);
-SELECT * FROM sales.orders;     -- cross-schema queries just work
+SELECT * FROM sales.orders;     -- cross-schema queries & foreign keys just work
+ALTER TABLE sales.orders SET SCHEMA archive;   -- move between schemas
+ALTER SCHEMA sales RENAME TO revenue;
 ```
 
-So `shop.db` with `shop.sales.db` and `shop.audit.db` next to it exposes three
-schemas: `public`, `sales`, `audit`.
+This makes `CREATE`/`DROP SCHEMA` transactional and lets foreign keys cross
+schemas. The file stays plain-SQLite readable (`sales.orders` is a table named
+`"sales.orders"`).
+
+Set **`OVERLITE_MULTITENANT_SCHEMA=true`** for the alternative model, where each
+schema is a *separate attached file* (`shop.db` + `shop.sales.db` +
+`shop.audit.db`) for physical per-tenant isolation — auto-discovered on connect.
+There schema DDL can't run in a transaction (`ATTACH` can't).
 
 ## Status
 
@@ -159,62 +167,77 @@ Everything marked ✅ is exercised end-to-end against real `psql` and pgx
 
 ## Limitations
 
-overlite stores in SQLite, so some Postgres features either can't be expressed
-faithfully or aren't modeled yet. The full, current breakdown:
+overlite stores in SQLite, so a few Postgres features either can't be expressed
+faithfully or aren't modeled yet. This is the *complete* list of what is **not
+done or only partial** — everything else is implemented (see Status above).
 
 ### Inherent to the SQLite backend
 
-These would require emulating features SQLite fundamentally lacks:
+These would require emulating what SQLite fundamentally lacks:
 
-- **Geometric / network types** — not modeled yet. (**Arrays**, **`hstore`**, and
-  **range types** *are* supported, stored as JSON/text — see Partial.)
-- **Infix `numeric` arithmetic** — SQLite's `+`/`-`/`*`/`/` operators are float,
-  and can't be overridden. (`numeric` *storage* is exact, though — see Partial —
-  and `dec_add`/`dec_mul`/… give exact results explicitly.) `money` and enforced
-  scale aren't modeled.
-- **Session `TimeZone` display** — `timestamptz` works (stores a UTC instant,
-  honors input offsets, `AT TIME ZONE` converts via the Go zone database), but
-  output is always rendered in UTC (`+00`); `SET timezone` doesn't change the
-  display zone.
-- **`ALTER TABLE ADD` PRIMARY KEY / FOREIGN KEY / CHECK** — accepted but not
-  enforced (a `pg_dump` restore relies on this). (`ALTER COLUMN TYPE`/`NOT
-  NULL`/`DEFAULT` and `ADD UNIQUE` *are* applied — see the ALTER TABLE note under
-  Partial.)
-- **PL/pgSQL** — `CREATE FUNCTION`/`PROCEDURE` are *accepted* (so migrations
-  proceed) but the body isn't executed; there's no procedural-language engine.
-- **`CREATE`/`DROP SCHEMA` inside a transaction** — schemas are attached files
-  and `ATTACH` can't run in a SQLite transaction (a clear error is returned).
-- **`SERIAL` in `pg_dump`** dumps as plain `integer` — on disk it is
-  `AUTOINCREMENT`, not a sequence.
+- **Infix `numeric` arithmetic** — SQLite's `+`/`-`/`*`/`/` are float and can't
+  be overridden. (`numeric` *storage*, ordering, and `sum`/`avg` are exact — see
+  Partial — and `dec_add`/`dec_mul`/… give exact infix results explicitly.)
+  `money` and enforced scale aren't modeled.
+- **`LATERAL` correlated subquery** — a LATERAL subquery that references the left
+  side can't (SQLite limit); LATERAL over set-returning functions works (Partial).
+- **Faithful integer OIDs** — every integer advertises as `int8` (catalog oids
+  exceed `int4`) and `numeric` as `float8` in `RowDescription`.
+- **Configurable isolation levels** — SQLite serializes writes; `SET`/`BEGIN
+  ISOLATION LEVEL` is accepted but has no effect.
+- **Session `TimeZone` display** — `timestamptz` stores a UTC instant and `AT
+  TIME ZONE` converts, but output always renders in UTC (`+00`); `SET timezone`
+  doesn't change the display zone.
+- **`CREATE`/`DROP SCHEMA` inside a transaction** — only in the opt-in multi-file
+  mode (`OVERLITE_MULTITENANT_SCHEMA=true`), where a schema is an attached file
+  and `ATTACH` can't run in a tx. The **default single-file mode makes it
+  transactional** (a schema is a name-prefixed set of tables).
+- **`SERIAL` in `pg_dump`** dumps as plain `integer` (on disk it is
+  `AUTOINCREMENT`, not a sequence).
 
-### Not implemented yet (but feasible)
+### Not implemented yet
 
-- **`CREATE TYPE`** range / base types (`… AS ENUM` is modeled and `… AS
-  (composite)` is recorded in the catalog; range/base are accepted as a no-op).
+- **PL/pgSQL functions, `PROCEDURE`, `AGGREGATE`** — no procedural-language
+  engine, so their bodies aren't executed (accepted so migrations proceed).
+  `CREATE FUNCTION … LANGUAGE sql` *is* executed, though — see Partial.
+- **`CREATE TRIGGER`** — SQLite has its own triggers, but Postgres trigger
+  *functions* (PL/pgSQL) aren't executed.
+- **Geometric / network types** (`point`/`box`/…, `inet`/`cidr`/`macaddr`) — not
+  modeled. (Arrays, `hstore`, and range types *are* — see Partial.)
+- **Composite types** — `CREATE TYPE … AS (…)` shows in `pg_type`/`\dT`, but the
+  fields aren't modeled (no composite storage/access). Range/base `CREATE TYPE`
+  are no-ops.
+- **`pg_get_expr` / `pg_get_functiondef`** — stubbed (return empty/const).
 - **Planner statistics** (`pg_statistic`, `pg_statistic_ext`) — empty; SQLite
-  keeps stats in a different shape (`sqlite_stat1`), not the Postgres one.
-  Everything backed by real data *is* populated, though: `pg_auth_members`
-  (role membership → `\du`/`\drg`), `pg_policy` + `pg_class.relrowsecurity`
-  (RLS in `\d`), and `pg_depend`/`pg_shdepend` (object dependencies & ownership).
+  keeps stats in a different shape (`sqlite_stat1`). Everything backed by real
+  data *is* populated (`pg_auth_members`, `pg_policy` + `pg_class.relrowsecurity`,
+  `pg_depend`/`pg_shdepend`).
 - No replication / HA.
 
 ### Accepted but not enforced (no-ops)
 
 These run so migrations, ORMs, and dumps proceed, but have no real effect:
 
-- **`COMMENT ON`** — accepted, not stored.
 - **`CREATE`/`DROP EXTENSION`** — the common functions (e.g. `gen_random_uuid`)
   are provided directly.
-- **`SET`/`BEGIN ISOLATION LEVEL`** — SQLite serializes writes; levels have no
-  effect.
-- **`ALTER … OWNER TO`, `ALTER SCHEMA`** — the creating role owns its tables
-  (and that drives privilege/RLS bypass), but *reassigning* an object's owner
-  isn't honored.
+- **`ALTER TABLE ADD` PRIMARY KEY / FOREIGN KEY / CHECK** — accepted but not
+  enforced (a `pg_dump` restore relies on this). `ALTER COLUMN TYPE`/`NOT NULL`/
+  `DEFAULT`, `ADD UNIQUE`, and `SET SCHEMA` *are* applied — see Partial.
+- **`ALTER … OWNER TO`** — the creating role owns its tables (which drives
+  privilege/RLS bypass), but *reassigning* an owner isn't honored. (`ALTER SCHEMA
+  … RENAME TO` *is* applied — see Schemas.)
+- **Role attributes** — `CONNECTION LIMIT` / `VALID UNTIL` are recorded but not
+  enforced; `REPLICATION`/`CREATEDB` gate features overlite doesn't have.
+  (`NOLOGIN`, `SUPERUSER`, `CREATEROLE`, per-role `PASSWORD` *are* enforced.)
 
 ### Partial (works, with caveats)
 
+- **`CREATE FUNCTION … LANGUAGE sql`** — executed by inlining the body at each
+  call site (a scalar subquery, or a derived table in `FROM`): named and `$1`
+  positional params, nested calls, `OR REPLACE`, `DROP FUNCTION`. Not yet listed
+  in `\df` or dumped by `pg_dump`.
 - **Roles & privileges** — `CREATE`/`ALTER`/`DROP ROLE`/`USER` show up in `\du`,
-  enforce a per-role `PASSWORD` (stored as a SCRAM verifier), drive
+  enforce a per-role `PASSWORD` (SCRAM verifier) and `NOLOGIN`, drive
   `current_user`/`SET ROLE`, and enforce table `GRANT`/`REVOKE`
   (`SELECT`/`INSERT`/`UPDATE`/`DELETE`/`TRUNCATE`/`ALL`) against the connected
   role, with the creating role owning its tables. Role membership
@@ -232,10 +255,10 @@ These run so migrations, ORMs, and dumps proceed, but have no real effect:
   `ON CONFLICT` DO NOTHING/DO UPDATE), with permissive/restrictive combining,
   default-deny, and owner/superuser/`BYPASSRLS` bypass. Not modeled:
   column-level privileges, `GRANT` on schemas/sequences/functions, and the
-  other role attributes (`SUPERUSER`, `CREATEDB`, …) beyond
-  `INHERIT`/`CREATEROLE`/`BYPASSRLS`. Superusers and roles that were never
-  `CREATE ROLE`'d bypass the checks, so existing single-user setups are
-  unaffected.
+  operational attributes `CONNECTION LIMIT`/`VALID UNTIL` (the access-control
+  ones — `LOGIN`, `SUPERUSER`, `CREATEROLE`, `INHERIT`, `BYPASSRLS`, `PASSWORD`
+  — are enforced). Superusers and roles that were never `CREATE ROLE`'d bypass
+  the checks, so existing single-user setups are unaffected.
 - **`numeric` / `decimal`** — stored as the exact decimal string in a `TEXT`
   cell (so a value beyond float64 precision round-trips losslessly and the file
   stays plain-SQLite readable), with numeric comparison/ordering via a `DECIMAL`
@@ -250,28 +273,33 @@ These run so migrations, ORMs, and dumps proceed, but have no real effect:
   needs the `::hstore` cast to be parsed.
 - **Range types** (`int4range`, `int8range`, `numrange`, `daterange`,
   `tsrange`, …) — stored as range text (`[1,10)`), with constructors,
-  `lower`/`upper`/`isempty`/`lower_inc`/`upper_inc`, and `@>` containment. No
-  discrete-range canonicalization or `&&`/`-` operators yet.
+  `lower`/`upper`/`isempty`/`lower_inc`/`upper_inc`, `@>` (range/element)
+  containment, and `&&` overlap. Caveats: no discrete-range canonicalization, and
+  the closed `[a,b]` form is ambiguous with a 2-element array. (Geometric/network
+  types are separate — see Not implemented.)
 - **`LATERAL`** — the keyword is dropped, so `FROM t, LATERAL json_each(t.x)`
   (and other set-returning functions) work; a LATERAL correlated *subquery* that
   references the left side still can't (a SQLite limitation).
 - **Enum columns** — enforced via `TEXT` + `CHECK` and `\dT+` lists the
   elements, but there's no enum ordering/comparison.
-- **Composite types** — `CREATE TYPE … AS (…)` shows in `pg_type`/`\dT`, but the
-  fields aren't modeled (no composite storage).
-- **`DISTINCT ON (...)`** — rewritten to a `ROW_NUMBER()` window; needs an
-  explicit column list (not `SELECT *`).
 - **`interval`** — `ts ± interval '1 day'` and `age()` work; no bare `interval`
   value type.
 - **`information_schema`** — constraints/columns/views/sequences/routines
-  populated; `check_constraints` is empty and column precision is `NULL`.
-- **Type OIDs** — common ones are faithful; all integers advertise as `int8`
-  (catalog oids exceed int4) and `numeric` advertises as `float8`.
-- **`SET search_path`** and **`COLLATE`** — accepted; unqualified names always
-  resolve in `public`/`main`, and unsupported collations are dropped.
+  populated, and column precision is reported (`character_maximum_length`,
+  `numeric_precision`/`_scale`); `check_constraints` is still empty (SQLite
+  checks are indistinguishable from the enum-backing `IN (…)` checks).
+- **`SET search_path`** — real in single-file mode: `SET`/`RESET`/`SHOW` and the
+  connection-time `search_path` (startup param / `options=-c search_path=`) are
+  honored; an unqualified name resolves to the first path schema that has it
+  (else `public`), and unqualified `CREATE TABLE` lands in the first path schema.
+  Best-effort: order across schemas that both hold a name, and comma-list
+  `FROM a, b` past the first table.
+- **`COLLATE`** — mapped to SQLite: case-insensitive collations → `NOCASE`,
+  `C`/`POSIX`/locale → the byte-order default (never an unknown-collation error).
 - **`ALTER TABLE`** — add/drop/rename column, rename table, `ALTER COLUMN
   TYPE`/`SET`/`DROP NOT NULL`/`DEFAULT` (via a create-copy-swap table rebuild
-  that preserves data, indexes, and triggers), and `ADD [CONSTRAINT] UNIQUE`
-  (a real unique index). `ADD` PRIMARY KEY/FOREIGN KEY/CHECK are accepted but
+  that preserves data, indexes, and triggers), `ADD [CONSTRAINT] UNIQUE`
+  (a real unique index), and `SET SCHEMA` (move a table between schemas,
+  single-file mode). `ADD` PRIMARY KEY/FOREIGN KEY/CHECK are accepted but
   not enforced.
 - **DBeaver** — connects and browses/reads data; full validation is in progress.
