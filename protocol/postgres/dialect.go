@@ -1041,9 +1041,10 @@ func rewriteDistinctOn(sql string) string {
 		return sql
 	}
 	selectList := strings.TrimSpace(sql[afterOn:fromIdx])
-	if selectList == "" || strings.Contains(selectList, "*") {
-		return sql // needs an explicit column list to drop the helper column
+	if selectList == "" {
+		return sql
 	}
+	star := strings.Contains(selectList, "*")
 
 	fromEtc, windowOrder, outerTail := sql[fromIdx:], "", ""
 	if obIdx := indexTopLevelWord(sql, fromIdx, "order"); obIdx >= 0 {
@@ -1062,9 +1063,130 @@ func rewriteDistinctOn(sql string) string {
 		windowOrder = " ORDER BY " + strings.TrimSpace(sql[by:endOrder])
 	}
 
+	if star {
+		// A "*" select list can't drop the helper column, so instead keep the
+		// first row per group by its rowid. Only a single base table has an
+		// unambiguous rowid; a join/multi-table "*" is left to error as before.
+		ref, qual, where, ok := singleTableRef(fromEtc)
+		if !ok {
+			return sql
+		}
+		ref = strings.TrimSpace(ref)
+		inner := "SELECT " + qual + ".rowid AS rid, ROW_NUMBER() OVER (PARTITION BY " +
+			strings.TrimSpace(onArgs) + windowOrder + ") AS _ov_rn " + ref
+		if where != "" {
+			inner += " " + where
+		}
+		return "SELECT " + selectList + " " + ref + " WHERE " + qual +
+			".rowid IN (SELECT rid FROM (" + inner + ") WHERE _ov_rn = 1)" + outerTail
+	}
+
 	inner := "SELECT *, ROW_NUMBER() OVER (PARTITION BY " + strings.TrimSpace(onArgs) +
 		windowOrder + ") AS _ov_rn " + strings.TrimSpace(fromEtc)
 	return "SELECT " + selectList + " FROM (" + inner + ") AS _ov WHERE _ov_rn = 1" + outerTail
+}
+
+// singleTableRef parses a FROM clause that is a single base table, returning the
+// "FROM <table> [alias]" prefix (ref), the name to qualify rowid with (qual, the
+// alias or bare table name), and any trailing WHERE/GROUP/… (where). ok is false
+// for joins, comma lists, subqueries or table functions.
+func singleTableRef(fromEtc string) (ref, qual, where string, ok bool) {
+	low := strings.ToLower(fromEtc)
+	p := skipSpaces(fromEtc, 0)
+	if !hasWordAt(low, p, "from") {
+		return "", "", "", false
+	}
+	tblStart := skipSpaces(fromEtc, p+len("from"))
+	// The table list ends at the first top-level WHERE/GROUP/HAVING/WINDOW.
+	end := len(fromEtc)
+	for _, kw := range []string{"where", "group", "having", "window"} {
+		if k := indexTopLevelWord(fromEtc, tblStart, kw); k >= 0 && k < end {
+			end = k
+		}
+	}
+	tableList := fromEtc[tblStart:end]
+	// A join or a comma means more than one table.
+	if hasTopLevelComma(tableList) {
+		return "", "", "", false
+	}
+	for _, kw := range []string{"join", "inner", "left", "right", "full", "cross", "natural"} {
+		if indexTopLevelWord(tableList, 0, kw) >= 0 {
+			return "", "", "", false
+		}
+	}
+	name, alias, ok := parseTableAndAlias(strings.TrimSpace(tableList))
+	if !ok {
+		return "", "", "", false
+	}
+	qual = alias
+	if qual == "" {
+		qual = name[strings.LastIndexByte(name, '.')+1:] // bare table name
+	}
+	return fromEtc[p:end], qual, strings.TrimSpace(fromEtc[end:]), true
+}
+
+// hasTopLevelComma reports whether s has a comma outside parentheses/strings.
+func hasTopLevelComma(s string) bool {
+	depth := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '\'':
+			i = endOfStringLiteral(s, i) - 1
+		case '(':
+			depth++
+		case ')':
+			if depth > 0 {
+				depth--
+			}
+		case ',':
+			if depth == 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// parseTableAndAlias splits "<table> [AS] [alias]" into its name and alias. It
+// rejects a table function or subquery (a parenthesis in the reference).
+func parseTableAndAlias(s string) (name, alias string, ok bool) {
+	if s == "" || strings.ContainsAny(s, "()") {
+		return "", "", false
+	}
+	tok, rest := readRefToken(s)
+	if tok == "" {
+		return "", "", false
+	}
+	rest = strings.TrimSpace(rest)
+	if rest != "" {
+		low := strings.ToLower(rest)
+		if hasWordAt(low, 0, "as") {
+			rest = strings.TrimSpace(rest[2:])
+		}
+		alias, _ = readRefToken(rest)
+	}
+	return tok, alias, true
+}
+
+// readRefToken reads one identifier token (allowing "quoted" parts and dotted
+// qualifiers) from the front of s, returning it and the remainder.
+func readRefToken(s string) (tok, rest string) {
+	i := 0
+	for i < len(s) {
+		if s[i] == '"' {
+			j := i + 1
+			for j < len(s) && s[j] != '"' {
+				j++
+			}
+			i = j + 1
+			continue
+		}
+		if s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r' {
+			break
+		}
+		i++
+	}
+	return s[:i], s[i:]
 }
 
 // indexTopLevelWord finds the first whole-word occurrence of word at paren depth
