@@ -85,14 +85,20 @@ func rangeContains(a, x string) bool {
 		return false
 	}
 	if !r.loInf {
-		lv, _ := ratFromString(r.lo)
+		lv, ok := ratFromString(r.lo)
+		if !ok {
+			return false
+		}
 		c := xv.Cmp(lv)
 		if c < 0 || (c == 0 && !r.loInc) {
 			return false
 		}
 	}
 	if !r.hiInf {
-		hv, _ := ratFromString(r.hi)
+		hv, ok := ratFromString(r.hi)
+		if !ok {
+			return false
+		}
 		c := xv.Cmp(hv)
 		if c > 0 || (c == 0 && !r.hiInc) {
 			return false
@@ -105,4 +111,93 @@ func ratPair(a, b string) (*big.Rat, *big.Rat, bool) {
 	x, okx := ratFromString(a)
 	y, oky := ratFromString(b)
 	return x, y, okx && oky
+}
+
+// rangeContainsRange reports whether range a contains range b (every point of b
+// is in a). The empty range is contained by every range and contains only
+// itself.
+func rangeContainsRange(a, b string) bool {
+	ra, oka := parseRange(a)
+	rb, okb := parseRange(b)
+	if !oka || !okb {
+		return false
+	}
+	if rb.empty {
+		return true
+	}
+	if ra.empty {
+		return false
+	}
+	return lowerCovers(ra, rb) && upperCovers(ra, rb)
+}
+
+// lowerCovers reports whether a's lower bound starts no later than b's.
+func lowerCovers(a, b rangeVal) bool {
+	if a.loInf {
+		return true
+	}
+	if b.loInf {
+		return false
+	}
+	av, bv, ok := ratPair(a.lo, b.lo)
+	if !ok {
+		return false
+	}
+	switch av.Cmp(bv) {
+	case -1:
+		return true
+	case 0:
+		return a.loInc || !b.loInc
+	}
+	return false
+}
+
+// upperCovers reports whether a's upper bound ends no earlier than b's.
+func upperCovers(a, b rangeVal) bool {
+	if a.hiInf {
+		return true
+	}
+	if b.hiInf {
+		return false
+	}
+	av, bv, ok := ratPair(a.hi, b.hi)
+	if !ok {
+		return false
+	}
+	switch av.Cmp(bv) {
+	case 1:
+		return true
+	case 0:
+		return a.hiInc || !b.hiInc
+	}
+	return false
+}
+
+// rangeOverlaps reports whether two ranges share at least one point.
+func rangeOverlaps(a, b string) bool {
+	ra, oka := parseRange(a)
+	rb, okb := parseRange(b)
+	if !oka || !okb || ra.empty || rb.empty {
+		return false
+	}
+	return startsBeforeEnd(ra, rb) && startsBeforeEnd(rb, ra)
+}
+
+// startsBeforeEnd reports whether x's lower bound is at or before y's upper
+// bound — one of the two conditions for overlap.
+func startsBeforeEnd(x, y rangeVal) bool {
+	if x.loInf || y.hiInf {
+		return true
+	}
+	lo, hi, ok := ratPair(x.lo, y.hi)
+	if !ok {
+		return false
+	}
+	switch lo.Cmp(hi) {
+	case -1:
+		return true
+	case 0:
+		return x.loInc && y.hiInc
+	}
+	return false
 }

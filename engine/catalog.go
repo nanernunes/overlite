@@ -332,10 +332,35 @@ var registerCatalog = sync.OnceFunc(func() {
 		}
 		a, b := fmt.Sprint(args[0]), fmt.Sprint(args[1])
 		ok := jsonbContains(a, b)
-		if isRangeText(a) {
-			ok = rangeContains(a, b)
+		// A range is range-text that isn't valid JSON ("[1,10)"); a JSON array
+		// ("[1,2,3]") stays jsonb containment.
+		if isRangeText(a) && !isJSONArrayText(a) {
+			if isRangeText(b) && !isJSONArrayText(b) {
+				ok = rangeContainsRange(a, b) // range @> range
+			} else {
+				ok = rangeContains(a, b) // range @> scalar element
+			}
 		}
 		if ok {
+			return int64(1), nil
+		}
+		return int64(0), nil
+	})
+	// Overlap operator "&&": ranges that share a point, or arrays with a common
+	// element.
+	scalar("overlite_overlaps", 2, func(args []driver.Value) (driver.Value, error) {
+		if len(args) < 2 || args[0] == nil || args[1] == nil {
+			return int64(0), nil
+		}
+		a, b := fmt.Sprint(args[0]), fmt.Sprint(args[1])
+		// Two JSON arrays -> array overlap; otherwise two ranges -> range overlap.
+		if isJSONArrayText(a) && isJSONArrayText(b) {
+			if ov, _ := jsonArraysOverlap(a, b); ov {
+				return int64(1), nil
+			}
+			return int64(0), nil
+		}
+		if isRangeText(a) && isRangeText(b) && rangeOverlaps(a, b) {
 			return int64(1), nil
 		}
 		return int64(0), nil

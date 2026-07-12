@@ -47,6 +47,7 @@ func rewrite(sql string) string {
 	sql = rewriteArrayCastDrop(sql) // expr::type[] -> expr (value already JSON)
 	sql = rewriteCasts(sql)
 	sql = rewriteJSONContains(sql) // after casts, so "x::jsonb @> ..." operands are whole
+	sql = rewriteOverlaps(sql)     // "a && b" range/array overlap
 	sql = rewriteJSONExists(sql)   // ? / ?| / ?& -> jsonb_exists*(), after arrays are json_array(…)
 	sql = rewriteArraySubscript(sql)
 	sql = rewriteObjectDefs(sql)
@@ -859,6 +860,7 @@ func rewriteJSONContains(sql string) string {
 		if ls == le || rs == re {
 			return sql // malformed; avoid looping
 		}
+		re = extendPastCall(sql, re) // include a right-hand function call's args
 		left, right := sql[ls:le], sql[rs:re]
 		repl := "json_contains(" + left + ", " + right + ")"
 		if op == "<@" { // a <@ b: b contains a
@@ -866,6 +868,59 @@ func rewriteJSONContains(sql string) string {
 		}
 		sql = sql[:ls] + repl + sql[re:]
 	}
+}
+
+// rewriteOverlaps maps the Postgres overlap operator "a && b" (ranges that
+// share a point, or arrays with a common element) onto overlite_overlaps(a, b).
+// SQLite has no "&&" operator, so any occurrence is this operator.
+func rewriteOverlaps(sql string) string {
+	for {
+		idx := indexOverlap(sql)
+		if idx < 0 {
+			return sql
+		}
+		ls, le := operandBefore(sql, idx)
+		rs, re := operandAfter(sql, idx+2)
+		if ls == le || rs == re {
+			return sql // malformed; avoid looping
+		}
+		re = extendPastCall(sql, re)
+		repl := "overlite_overlaps(" + sql[ls:le] + ", " + sql[rs:re] + ")"
+		sql = sql[:ls] + repl + sql[re:]
+	}
+}
+
+// extendPastCall extends an operand end past a following function call's
+// argument list: operandAfter stops at the "(" of a call like int4range(1,10),
+// leaving the parens dangling, so pull them in.
+func extendPastCall(sql string, re int) int {
+	for re < len(sql) {
+		p := re
+		for p < len(sql) && (sql[p] == ' ' || sql[p] == '\t') {
+			p++
+		}
+		if p < len(sql) && sql[p] == '(' {
+			_, re = balancedParen(sql, p)
+			continue
+		}
+		break
+	}
+	return re
+}
+
+// indexOverlap finds the first "&&" operator outside a string literal.
+func indexOverlap(sql string) int {
+	inStr := false
+	for i := 0; i+1 < len(sql); i++ {
+		if sql[i] == '\'' {
+			inStr = !inStr
+			continue
+		}
+		if !inStr && sql[i] == '&' && sql[i+1] == '&' {
+			return i
+		}
+	}
+	return -1
 }
 
 // reLateral matches the LATERAL keyword.
