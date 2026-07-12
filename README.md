@@ -109,15 +109,15 @@ schemas: `public`, `sales`, `audit`.
 High level, at a glance — including what's still needed to be **Postgres-ready
 for a real production system**. ✅ done · 🟡 partial · ⬜ not yet.
 
-Across the full feature matrix — **151 items: ✅ 126 · 🟡 17 · ⬜ 8**
-(83% done, 95% at least partial):
+Across the full feature matrix — **152 items: ✅ 127 · 🟡 18 · ⬜ 7**
+(84% done, 95% at least partial):
 
 | Area | ✅ | 🟡 | ⬜ |
 |---|--:|--:|--:|
 | Wire protocol | 13 | 1 | 0 |
 | Authentication | 9 | 0 | 0 |
 | DML (queries) | 11 | 1 | 1 |
-| DDL (schema) | 24 | 6 | 3 |
+| DDL (schema) | 25 | 7 | 2 |
 | Data types | 11 | 2 | 1 |
 | Transactions | 7 | 1 | 1 |
 | Schemas (multi-file) | 6 | 1 | 0 |
@@ -138,7 +138,7 @@ Across the full feature matrix — **151 items: ✅ 126 · 🟡 17 · ⬜ 8**
 | Introspection | ✅ | `pg_catalog` + `information_schema` (psql `\dt`/`\d`/`\l`, GUIs) |
 | Authentication | ✅ | trust, `POSTGRES_PASSWORD` with SCRAM-SHA-256 (default)/md5/cleartext, TLS, and per-connection `pg_hba` (conf or YAML) |
 | Concurrency | ✅ | dedicated connection per client; reads run in parallel, writes serialize (SQLite single-writer) |
-| Migrations (`ALTER TABLE`) | 🟡 | add/drop/rename column; no `ALTER COLUMN TYPE` / `ADD CONSTRAINT` |
+| Migrations (`ALTER TABLE`) | ✅ | add/drop/rename column, `ALTER COLUMN TYPE`/`NOT NULL`/`DEFAULT` (table rebuild), `ADD UNIQUE`; `ADD` PK/FK/CHECK not enforced |
 | Numeric precision | 🟡 | exact decimal storage + compare/order + `sum`/`avg`; infix `+`/`-`/`*` still float |
 | Timestamps with time zone | ✅ | `timestamptz` stores a UTC instant; offsets honored, `AT TIME ZONE` works; output always UTC |
 | Backup / restore | ✅ | `\copy` and `pg_dump` (schema + data: types, constraints, sequences) |
@@ -178,10 +178,10 @@ These would require emulating features SQLite fundamentally lacks:
   honors input offsets, `AT TIME ZONE` converts via the Go zone database), but
   output is always rendered in UTC (`+00`); `SET timezone` doesn't change the
   display zone.
-- **`ALTER TABLE ALTER COLUMN TYPE`** and **`ADD CONSTRAINT`** — SQLite can't
-  change a column's type or add a constraint to an existing table. (A `pg_dump`
-  restore still loads data/tables/sequences; those constraint statements are
-  accepted but not enforced.)
+- **`ALTER TABLE ADD` PRIMARY KEY / FOREIGN KEY / CHECK** — accepted but not
+  enforced (a `pg_dump` restore relies on this). (`ALTER COLUMN TYPE`/`NOT
+  NULL`/`DEFAULT` and `ADD UNIQUE` *are* applied — see the ALTER TABLE note under
+  Partial.)
 - **`DEFAULT nextval('seq')` in DDL** — SQLite rejects non-constant defaults;
   use `SERIAL` (which maps to `INTEGER PRIMARY KEY AUTOINCREMENT`).
 - **`CREATE FUNCTION` / PL/pgSQL / stored procedures.**
@@ -264,5 +264,9 @@ These run so migrations, ORMs, and dumps proceed, but have no real effect:
   (catalog oids exceed int4) and `numeric` advertises as `float8`.
 - **`SET search_path`** and **`COLLATE`** — accepted; unqualified names always
   resolve in `public`/`main`, and unsupported collations are dropped.
-- **`ALTER TABLE`** — add/drop/rename column and rename table only.
+- **`ALTER TABLE`** — add/drop/rename column, rename table, `ALTER COLUMN
+  TYPE`/`SET`/`DROP NOT NULL`/`DEFAULT` (via a create-copy-swap table rebuild
+  that preserves data, indexes, and triggers), and `ADD [CONSTRAINT] UNIQUE`
+  (a real unique index). `ADD` PRIMARY KEY/FOREIGN KEY/CHECK are accepted but
+  not enforced.
 - **DBeaver** — connects and browses/reads data; full validation is in progress.

@@ -76,6 +76,8 @@ type prepared struct {
 	grant string
 	// rlsDDL holds a raw RLS DDL statement (ALTER TABLE … RLS / CREATE POLICY).
 	rlsDDL string
+	// alterDDL holds a raw ALTER TABLE we implement (rebuild / unique index).
+	alterDDL string
 }
 
 type portal struct {
@@ -318,6 +320,10 @@ func (s *session) handleParse(body []byte) error {
 		s.prepared[name] = &prepared{txControl: kind}
 		return s.c.send(msgParseComplete, nil)
 	}
+	if alterTableHandled(raw) {
+		s.prepared[name] = &prepared{alterDDL: raw}
+		return s.c.send(msgParseComplete, nil)
+	}
 	if rs, ok := interceptUtility(raw); ok {
 		s.prepared[name] = &prepared{util: rs}
 		return s.c.send(msgParseComplete, nil)
@@ -403,7 +409,7 @@ func (s *session) handleDescribe(body []byte) error {
 		if prep == nil {
 			return s.protoError("26000", "unknown prepared statement "+quoteName(name))
 		}
-		if prep.util != nil || prep.txControl != "" || prep.seqDDL != "" || prep.typeDDL != "" || prep.setRole != "" || prep.grant != "" || prep.rlsDDL != "" {
+		if prep.util != nil || prep.txControl != "" || prep.seqDDL != "" || prep.typeDDL != "" || prep.setRole != "" || prep.grant != "" || prep.rlsDDL != "" || prep.alterDDL != "" {
 			if err := s.c.sendParameterDescription(0); err != nil {
 				return err
 			}
@@ -421,7 +427,7 @@ func (s *session) handleDescribe(body []byte) error {
 			return s.protoError("34000", "unknown portal "+quoteName(name))
 		}
 		prep = pt.prep
-		if prep.util != nil || prep.txControl != "" || prep.seqDDL != "" || prep.typeDDL != "" || prep.setRole != "" || prep.grant != "" || prep.rlsDDL != "" {
+		if prep.util != nil || prep.txControl != "" || prep.seqDDL != "" || prep.typeDDL != "" || prep.setRole != "" || prep.grant != "" || prep.rlsDDL != "" || prep.alterDDL != "" {
 			return s.sendUtilDescribe(prep.util)
 		}
 		args = pt.params
@@ -531,6 +537,17 @@ func (s *session) handleExecute(body []byte) error {
 				s.txFailed = true
 			}
 			return s.protoError("42000", err.Error())
+		}
+		return s.c.sendCommandComplete(tag)
+	}
+
+	if pt.prep.alterDDL != "" {
+		tag, _, err := s.tryAlterTable(pt.prep.alterDDL)
+		if err != nil {
+			if s.tx != nil {
+				s.txFailed = true
+			}
+			return s.protoExecError(err)
 		}
 		return s.c.sendCommandComplete(tag)
 	}

@@ -410,6 +410,16 @@ func (s *session) handleSimpleQuery(body []byte) error {
 		return s.c.sendCommandComplete(tag)
 	}
 
+	if tag, handled, err := s.tryAlterTable(sql); handled {
+		if err != nil {
+			if s.tx != nil {
+				s.txFailed = true
+			}
+			return s.sendExecError(err)
+		}
+		return s.c.sendCommandComplete(tag)
+	}
+
 	if tag, handled, err := s.trySequenceDDL(sql); handled {
 		if err != nil {
 			if s.tx != nil {
