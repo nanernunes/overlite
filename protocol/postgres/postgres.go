@@ -153,6 +153,13 @@ func (cred credential) matches(password string) bool {
 // authenticate runs the auth method resolved for this connection against the
 // client (the pg_hba policy decides when configured, else the global method).
 func (p *Protocol) authenticate(c *wireConn, user, database string, ip net.IP, ssl bool, sess core.Session) error {
+	// A role explicitly marked NOLOGIN can't open a session, whatever the auth
+	// method (Postgres checks this before authenticating).
+	if !roleMayLogin(sess, user) {
+		_ = c.sendFatal("28000", fmt.Sprintf("role %q is not permitted to log in", user))
+		_ = c.flush()
+		return fmt.Errorf("role %q is not permitted to log in", user)
+	}
 	method := p.resolveMethod(user, database, ip, ssl)
 	if method == "reject" {
 		_ = c.sendFatal("28000",
@@ -187,6 +194,20 @@ func (p *Protocol) credentialFor(sess core.Session, user string) (credential, bo
 		return credential{plaintext: p.password}, true
 	}
 	return credential{}, false
+}
+
+// roleMayLogin reports whether the connecting role is allowed to open a session.
+// A role is blocked only when it exists in _overlite_roles and its rolcanlogin
+// flag is 0 (NOLOGIN); an unknown role (or one predating the flag) is allowed,
+// so trust auth and the global password keep working.
+func roleMayLogin(sess core.Session, user string) bool {
+	rs, err := sess.Execute(context.Background(),
+		"SELECT rolcanlogin FROM _overlite_roles WHERE rolname = ? COLLATE NOCASE",
+		[]core.Value{user})
+	if err != nil || len(rs.Rows) == 0 || rs.Rows[0][0] == nil {
+		return true
+	}
+	return fmt.Sprint(rs.Rows[0][0]) != "0"
 }
 
 // lookupRoleVerifier reads a role's stored SCRAM verifier from _overlite_roles.
