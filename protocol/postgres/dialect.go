@@ -17,6 +17,7 @@ func rewrite(sql string) string {
 	sql = rewriteDistinctOn(sql)
 	sql = rewriteSerial(sql)
 	sql = rewriteNumericColumns(sql)
+	sql = rewriteLateral(sql)
 	sql = rewriteNow(sql)
 	sql = rewriteTimestamptzLiteral(sql) // offset-bearing timestamp literal -> UTC
 	sql = rewriteAtTimeZone(sql)         // expr AT TIME ZONE 'zone'
@@ -800,6 +801,22 @@ func rewriteJSONContains(sql string) string {
 		}
 		sql = sql[:ls] + repl + sql[re:]
 	}
+}
+
+// reLateral matches the LATERAL keyword.
+var reLateral = regexp.MustCompile(`(?i)\blateral\b`)
+
+// rewriteLateral drops the LATERAL keyword: SQLite treats table-valued functions
+// in the FROM clause as implicitly lateral, so `FROM t, LATERAL json_each(t.x)`
+// works once the keyword is removed. (A LATERAL correlated *subquery* still can't
+// reference the left side — a SQLite limitation.)
+func rewriteLateral(sql string) string {
+	if !strings.Contains(strings.ToLower(sql), "lateral") {
+		return sql
+	}
+	return mapOutsideStrings(sql, func(code string) string {
+		return reLateral.ReplaceAllString(code, " ")
+	})
 }
 
 // rewriteJSONExists maps the jsonb key-existence operators `?` / `?|` / `?&`

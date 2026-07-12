@@ -471,6 +471,9 @@ func (s *session) handleSimpleQuery(body []byte) error {
 		return s.c.sendError("42501", err.Error())
 	}
 
+	// Record/strip nextval column defaults (CREATE TABLE) or inject them (INSERT).
+	sql = s.applyColumnDefaults(sql)
+
 	if handled, rs, err := s.tryRLSInsert(sql, nil); handled {
 		if err != nil {
 			if s.tx != nil {

@@ -13,6 +13,14 @@ package engine
 // (next nextval returns start_value) from "advanced" (next returns last_value +
 // increment). min_value/max_value are materialized at CREATE time so nextval's
 // bounds/CYCLE logic needs no defaults.
+// columnDefaultsTableDDL records `DEFAULT nextval('seq')` column defaults (which
+// SQLite can't express), so the protocol can inject the value on insert.
+const columnDefaultsTableDDL = `CREATE TABLE IF NOT EXISTS _overlite_defaults (
+  tablename TEXT COLLATE NOCASE,
+  colname   TEXT COLLATE NOCASE,
+  seqname   TEXT
+)`
+
 const sequencesTableDDL = `CREATE TABLE IF NOT EXISTS _overlite_sequences (
   seqname     TEXT PRIMARY KEY COLLATE NOCASE,
   last_value  INTEGER NOT NULL DEFAULT 1,

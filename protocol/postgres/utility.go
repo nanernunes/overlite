@@ -56,6 +56,17 @@ func interceptUtility(sql string) (*core.ResultSet, bool) {
 		if secondWordUpper(sql) == "EXTENSION" {
 			return &core.ResultSet{Command: w + " EXTENSION"}, true
 		}
+		// CREATE/DROP FUNCTION/PROCEDURE/AGGREGATE: SQLite has no stored routines
+		// (no PL/pgSQL engine), but accept the DDL so migrations that define them
+		// proceed. The body isn't executed. The keyword is one of the leading
+		// words (e.g. CREATE OR REPLACE FUNCTION), never a column name.
+		lead := strings.Fields(strings.ToUpper(sql))
+		for i := 1; i < len(lead) && i < 4; i++ {
+			switch lead[i] {
+			case "FUNCTION", "PROCEDURE", "AGGREGATE":
+				return &core.ResultSet{Command: w + " " + lead[i]}, true
+			}
+		}
 	case "ALTER":
 		// Restore-time statements SQLite can't run: ownership changes, schema
 		// alters, and constraints added to an existing table. Accepted as no-ops

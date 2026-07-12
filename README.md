@@ -109,16 +109,16 @@ schemas: `public`, `sales`, `audit`.
 High level, at a glance — including what's still needed to be **Postgres-ready
 for a real production system**. ✅ done · 🟡 partial · ⬜ not yet.
 
-Across the full feature matrix — **153 items: ✅ 128 · 🟡 19 · ⬜ 6**
-(84% done, 96% at least partial):
+Across the full feature matrix — **153 items: ✅ 129 · 🟡 22 · ⬜ 2**
+(84% done, 99% at least partial):
 
 | Area | ✅ | 🟡 | ⬜ |
 |---|--:|--:|--:|
 | Wire protocol | 13 | 1 | 0 |
 | Authentication | 9 | 0 | 0 |
-| DML (queries) | 11 | 1 | 1 |
-| DDL (schema) | 25 | 7 | 2 |
-| Data types | 11 | 3 | 1 |
+| DML (queries) | 11 | 2 | 0 |
+| DDL (schema) | 26 | 8 | 0 |
+| Data types | 11 | 4 | 0 |
 | Transactions | 7 | 1 | 1 |
 | Schemas (multi-file) | 6 | 1 | 0 |
 | Catalog / introspection | 20 | 2 | 1 |
@@ -128,7 +128,7 @@ Across the full feature matrix — **153 items: ✅ 128 · 🟡 19 · ⬜ 6**
 | Area | Status | Notes |
 |---|---|---|
 | Wire protocol | ✅ | simple & extended, prepared statements, text/binary |
-| SQL (DML) | ✅ | CRUD, joins, CTEs, window functions, upsert, `RETURNING` |
+| SQL (DML) | ✅ | CRUD, joins, CTEs, window functions, upsert, `RETURNING`, `LATERAL` (over set-returning functions) |
 | DDL | ✅ | tables, indexes, views, foreign keys |
 | Transactions | ✅ | real `BEGIN`/`COMMIT`/`ROLLBACK` with aborted-tx semantics |
 | Schemas | ✅ | one file per schema, `CREATE`/`DROP`, auto-discovery |
@@ -143,12 +143,12 @@ Across the full feature matrix — **153 items: ✅ 128 · 🟡 19 · ⬜ 6**
 | Timestamps with time zone | ✅ | `timestamptz` stores a UTC instant; offsets honored, `AT TIME ZONE` works; output always UTC |
 | Backup / restore | ✅ | `\copy` and `pg_dump` (schema + data: types, constraints, sequences) |
 | Roles & permissions | 🟡 | `\du` roles with enforced passwords, table ownership, `GRANT`/`REVOKE` of table privileges, role membership with `INHERIT`, `CREATEROLE`/`ADMIN OPTION` policing, and row-level security (`CREATE POLICY`); no column-level privileges |
-| Server-side logic | ⬜ | PL/pgSQL functions & procedures (triggers only in SQLite syntax) |
-| Sequences | ✅ | `CREATE`/`ALTER`/`DROP SEQUENCE`, `nextval`/`currval`/`setval`/`lastval`, `\ds`; `DEFAULT nextval()` in DDL not supported (use `SERIAL`) |
+| Server-side logic | 🟡 | `CREATE FUNCTION`/`PROCEDURE` accepted (body not executed); no PL/pgSQL engine; triggers in SQLite syntax |
+| Sequences | ✅ | `CREATE`/`ALTER`/`DROP SEQUENCE`, `nextval`/`currval`/`setval`/`lastval`, `\ds`, and `DEFAULT nextval()` in DDL |
 | Enum types | 🟡 | `CREATE`/`ALTER`/`DROP TYPE … AS ENUM`, `\dT`; enum columns become `TEXT` + a `CHECK`; no enum ordering semantics |
 | `uuid` type | ✅ | stored as text; `gen_random_uuid()`/`uuid_generate_v4()` |
 | Query cancellation | ✅ | `CancelRequest` interrupts a running query |
-| Rich types | 🟡 | arrays + `hstore` supported (stored as JSON); ranges/geometric not yet; `interval` arithmetic partial |
+| Rich types | 🟡 | arrays, `hstore`, and range types supported (stored as JSON/text); geometric/network not yet; `interval` arithmetic partial |
 | Extensions | 🟡 | `CREATE EXTENSION` accepted as a no-op; common functions provided directly |
 | `LISTEN`/`NOTIFY` | 🟡 | accepted as no-ops (no delivery) |
 | Replication / HA | ⬜ | |
@@ -166,8 +166,8 @@ faithfully or aren't modeled yet. The full, current breakdown:
 
 These would require emulating features SQLite fundamentally lacks:
 
-- **Geometric / network / range types** — not modeled yet. (**Arrays** and
-  **`hstore`** *are* supported, stored as JSON — see Partial.)
+- **Geometric / network types** — not modeled yet. (**Arrays**, **`hstore`**, and
+  **range types** *are* supported, stored as JSON/text — see Partial.)
 - **Infix `numeric` arithmetic** — SQLite's `+`/`-`/`*`/`/` operators are float,
   and can't be overridden. (`numeric` *storage* is exact, though — see Partial —
   and `dec_add`/`dec_mul`/… give exact results explicitly.) `money` and enforced
@@ -180,12 +180,10 @@ These would require emulating features SQLite fundamentally lacks:
   enforced (a `pg_dump` restore relies on this). (`ALTER COLUMN TYPE`/`NOT
   NULL`/`DEFAULT` and `ADD UNIQUE` *are* applied — see the ALTER TABLE note under
   Partial.)
-- **`DEFAULT nextval('seq')` in DDL** — SQLite rejects non-constant defaults;
-  use `SERIAL` (which maps to `INTEGER PRIMARY KEY AUTOINCREMENT`).
-- **`CREATE FUNCTION` / PL/pgSQL / stored procedures.**
-- **`LATERAL` joins.**
+- **PL/pgSQL** — `CREATE FUNCTION`/`PROCEDURE` are *accepted* (so migrations
+  proceed) but the body isn't executed; there's no procedural-language engine.
 - **`CREATE`/`DROP SCHEMA` inside a transaction** — schemas are attached files
-  and `ATTACH` can't run in a SQLite transaction.
+  and `ATTACH` can't run in a SQLite transaction (a clear error is returned).
 - **`SERIAL` in `pg_dump`** dumps as plain `integer` — on disk it is
   `AUTOINCREMENT`, not a sequence.
 
@@ -251,6 +249,13 @@ These run so migrations, ORMs, and dumps proceed, but have no real effect:
   `->>` (value), `?` (key existence), `akeys`/`avals`, `hstore(k,v)`. Caveats:
   `->` returns the JSON-quoted scalar (use `->>` for text), and a bare insert
   needs the `::hstore` cast to be parsed.
+- **Range types** (`int4range`, `int8range`, `numrange`, `daterange`,
+  `tsrange`, …) — stored as range text (`[1,10)`), with constructors,
+  `lower`/`upper`/`isempty`/`lower_inc`/`upper_inc`, and `@>` containment. No
+  discrete-range canonicalization or `&&`/`-` operators yet.
+- **`LATERAL`** — the keyword is dropped, so `FROM t, LATERAL json_each(t.x)`
+  (and other set-returning functions) work; a LATERAL correlated *subquery* that
+  references the left side still can't (a SQLite limitation).
 - **Enum columns** — enforced via `TEXT` + `CHECK` and `\dT+` lists the
   elements, but there's no enum ordering/comparison.
 - **Composite types** — `CREATE TYPE … AS (…)` shows in `pg_type`/`\dT`, but the

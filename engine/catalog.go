@@ -314,15 +314,87 @@ var registerCatalog = sync.OnceFunc(func() {
 		return sqliteTypeOID(fmt.Sprint(args[0])), nil
 	})
 
-	// jsonb containment (@> / <@, rewritten to json_contains in the dialect).
+	// jsonb containment (@> / <@, rewritten to json_contains in the dialect); the
+	// same operator on a range checks range containment.
 	scalar("json_contains", 2, func(args []driver.Value) (driver.Value, error) {
 		if len(args) < 2 || args[0] == nil || args[1] == nil {
 			return int64(0), nil
 		}
-		if jsonbContains(fmt.Sprint(args[0]), fmt.Sprint(args[1])) {
+		a, b := fmt.Sprint(args[0]), fmt.Sprint(args[1])
+		ok := jsonbContains(a, b)
+		if isRangeText(a) {
+			ok = rangeContains(a, b)
+		}
+		if ok {
 			return int64(1), nil
 		}
 		return int64(0), nil
+	})
+
+	// Range constructors (2 or 3 args): int4range/int8range/numrange/daterange/
+	// tsrange/tstzrange all build the same text form.
+	for _, name := range []string{"int4range", "int8range", "numrange", "daterange", "tsrange", "tstzrange"} {
+		scalar(name, -1, func(a []driver.Value) (driver.Value, error) {
+			if len(a) < 2 {
+				return nil, nil
+			}
+			bounds := "[)"
+			if len(a) >= 3 && a[2] != nil {
+				bounds = fmt.Sprint(a[2])
+			}
+			return makeRange(argStr(a[0]), argStr(a[1]), bounds), nil
+		})
+	}
+	rangeAcc := func(name string, f func(rangeVal) driver.Value) {
+		scalar(name, 1, func(a []driver.Value) (driver.Value, error) {
+			if len(a) == 0 || a[0] == nil {
+				return nil, nil
+			}
+			r, ok := parseRange(fmt.Sprint(a[0]))
+			if !ok {
+				return nil, nil
+			}
+			return f(r), nil
+		})
+	}
+	boolI := func(b bool) driver.Value {
+		if b {
+			return int64(1)
+		}
+		return int64(0)
+	}
+	rangeAcc("isempty", func(r rangeVal) driver.Value { return boolI(r.empty) })
+	rangeAcc("lower_inc", func(r rangeVal) driver.Value { return boolI(!r.empty && r.loInc) })
+	rangeAcc("upper_inc", func(r rangeVal) driver.Value { return boolI(!r.empty && r.hiInc) })
+	// lower/upper are overloaded: a range yields its bound, otherwise the string
+	// case functions (which SQLite provides).
+	scalar("lower", 1, func(a []driver.Value) (driver.Value, error) {
+		if len(a) == 0 || a[0] == nil {
+			return nil, nil
+		}
+		s := fmt.Sprint(a[0])
+		if isRangeText(s) {
+			r, _ := parseRange(s)
+			if r.empty || r.loInf {
+				return nil, nil
+			}
+			return r.lo, nil
+		}
+		return strings.ToLower(s), nil
+	})
+	scalar("upper", 1, func(a []driver.Value) (driver.Value, error) {
+		if len(a) == 0 || a[0] == nil {
+			return nil, nil
+		}
+		s := fmt.Sprint(a[0])
+		if isRangeText(s) {
+			r, _ := parseRange(s)
+			if r.empty || r.hiInf {
+				return nil, nil
+			}
+			return r.hi, nil
+		}
+		return strings.ToUpper(s), nil
 	})
 	// jsonb key existence (? / ?| / ?&, rewritten from those operators).
 	boolFn := func(b bool) driver.Value {

@@ -574,7 +574,8 @@ func (s *session) handleExecute(body []byte) error {
 			}
 			return s.protoError("42501", err.Error())
 		}
-		if handled, rs, err := s.tryRLSInsert(pt.prep.raw, pt.params); handled {
+		raw := s.applyColumnDefaults(pt.prep.raw)
+		if handled, rs, err := s.tryRLSInsert(raw, pt.params); handled {
 			if err != nil {
 				if s.tx != nil {
 					s.txFailed = true
@@ -593,7 +594,7 @@ func (s *session) handleExecute(body []byte) error {
 			s.resetPortal(pt)
 			return s.c.sendCommandComplete(commandTag(rs))
 		}
-		execSQL, err := s.rewriteForExec(pt.prep.raw)
+		execSQL, err := s.rewriteForExec(raw)
 		if err != nil {
 			if s.tx != nil {
 				s.txFailed = true

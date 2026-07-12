@@ -171,6 +171,9 @@ func setupConnection(ctx context.Context, exec func(string) error, query func(st
 	if err := exec(sequencesTableDDL); err != nil {
 		return err
 	}
+	if err := exec(columnDefaultsTableDDL); err != nil {
+		return err
+	}
 	// The internal enum tables (pg_type/pg_enum read them; enum columns become
 	// TEXT + CHECK).
 	if err := exec(enumTypesTableDDL); err != nil {
