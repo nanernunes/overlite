@@ -126,6 +126,11 @@ func oidForColumn(col core.Column, rows [][]core.Value, idx int) uint32 {
 	if isTimestamptzDecl(col.DeclType) {
 		return oidTimestamptz
 	}
+	// numeric is stored as exact decimal text (declared DECIMALTEXT); sampling
+	// would see a string, so trust the marker.
+	if strings.Contains(strings.ToUpper(col.DeclType), "DECIMALTEXT") {
+		return oidNumeric
+	}
 	// A faithfully-mappable declared type wins over value sampling (which would
 	// e.g. see a boolean's 0/1 as int, or a json string as text).
 	if oid, ok := strictDeclOID(col.DeclType); ok {

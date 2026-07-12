@@ -6,6 +6,7 @@ import (
 	"database/sql/driver"
 	"fmt"
 	"io"
+	"math/big"
 	"regexp"
 	"strings"
 	"sync"
@@ -91,6 +92,56 @@ var registerCatalog = sync.OnceFunc(func() {
 	for _, name := range []string{"gen_random_uuid", "uuid_generate_v4"} {
 		scalarND(name, 0, func([]driver.Value) (driver.Value, error) { return newUUIDv4() })
 	}
+
+	// Exact numeric: a collation that compares decimal text numerically, plus
+	// math/big-backed arithmetic and an exact aggregate sum (see decimal.go).
+	sqlite.MustRegisterCollationUtf8("DECIMAL", func(l, r string) int { return decCmp(l, r) })
+	scalar("dec_add", 2, func(a []driver.Value) (driver.Value, error) {
+		return binDec(a[0], a[1], func(z, x, y *big.Rat) *big.Rat { return z.Add(x, y) })
+	})
+	scalar("dec_sub", 2, func(a []driver.Value) (driver.Value, error) {
+		return binDec(a[0], a[1], func(z, x, y *big.Rat) *big.Rat { return z.Sub(x, y) })
+	})
+	scalar("dec_mul", 2, func(a []driver.Value) (driver.Value, error) {
+		return binDec(a[0], a[1], func(z, x, y *big.Rat) *big.Rat { return z.Mul(x, y) })
+	})
+	scalar("dec_div", 2, func(a []driver.Value) (driver.Value, error) {
+		if y, ok := parseDec(a[1]); ok && y.Sign() == 0 {
+			return nil, nil // division by zero -> NULL
+		}
+		return binDec(a[0], a[1], func(z, x, y *big.Rat) *big.Rat { return z.Quo(x, y) })
+	})
+	scalar("dec_cmp", 2, func(a []driver.Value) (driver.Value, error) {
+		return int64(decCmp(a[0], a[1])), nil
+	})
+	scalar("dec_round", -1, func(a []driver.Value) (driver.Value, error) {
+		if len(a) == 0 {
+			return nil, nil
+		}
+		r, ok := parseDec(a[0])
+		if !ok {
+			return nil, nil
+		}
+		scale := 0
+		if len(a) > 1 {
+			scale = int(asInt64(a[1]))
+		}
+		return decString(decRound(r, scale)), nil
+	})
+	sqlite.MustRegisterFunction("dec_sum", &sqlite.FunctionImpl{
+		NArgs:         1,
+		MakeAggregate: func(sqlite.FunctionContext) (sqlite.AggregateFunction, error) { return &decSum{}, nil },
+	})
+	// Override the built-in sum/avg so they are exact over numeric (decimal-text)
+	// columns; int/real inputs keep their native return type.
+	sqlite.MustRegisterFunction("sum", &sqlite.FunctionImpl{
+		NArgs:         1,
+		MakeAggregate: func(sqlite.FunctionContext) (sqlite.AggregateFunction, error) { return &decAgg{}, nil },
+	})
+	sqlite.MustRegisterFunction("avg", &sqlite.FunctionImpl{
+		NArgs:         1,
+		MakeAggregate: func(sqlite.FunctionContext) (sqlite.AggregateFunction, error) { return &decAgg{avg: true}, nil },
+	})
 
 	scalar("version", 0, func([]driver.Value) (driver.Value, error) {
 		return "PostgreSQL 15.0 (overlite) on overlite, compiled by overlite", nil
@@ -343,6 +394,8 @@ const (
 func sqliteTypeOID(decl string) int64 {
 	d := strings.ToUpper(decl)
 	switch {
+	case strings.Contains(d, "DECIMALTEXT"): // overlite's exact-numeric storage type
+		return typeOIDNumeric
 	case strings.Contains(d, "UUID"):
 		return typeOIDUUID
 	case strings.Contains(d, "JSONB"):

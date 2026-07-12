@@ -139,7 +139,7 @@ Across the full feature matrix — **151 items: ✅ 126 · 🟡 17 · ⬜ 8**
 | Authentication | ✅ | trust, `POSTGRES_PASSWORD` with SCRAM-SHA-256 (default)/md5/cleartext, TLS, and per-connection `pg_hba` (conf or YAML) |
 | Concurrency | ✅ | dedicated connection per client; reads run in parallel, writes serialize (SQLite single-writer) |
 | Migrations (`ALTER TABLE`) | 🟡 | add/drop/rename column; no `ALTER COLUMN TYPE` / `ADD CONSTRAINT` |
-| Numeric precision | 🟡 | SQLite affinity; not exact fixed-point (money) |
+| Numeric precision | 🟡 | exact decimal storage + compare/order + `sum`/`avg`; infix `+`/`-`/`*` still float |
 | Timestamps with time zone | ✅ | `timestamptz` stores a UTC instant; offsets honored, `AT TIME ZONE` works; output always UTC |
 | Backup / restore | ✅ | `\copy` and `pg_dump` (schema + data: types, constraints, sequences) |
 | Roles & permissions | 🟡 | `\du` roles with enforced passwords, table ownership, `GRANT`/`REVOKE` of table privileges, role membership with `INHERIT`, `CREATEROLE`/`ADMIN OPTION` policing, and row-level security (`CREATE POLICY`); no column-level privileges |
@@ -170,8 +170,10 @@ These would require emulating features SQLite fundamentally lacks:
   are supported, though — stored as JSON, they round-trip as real Postgres
   arrays with `ARRAY[…]`, `{…}` output, subscripts, `array_length`, `= ANY`, and
   `unnest`.)
-- **Exact `numeric`/`decimal`** precision & scale, and **`money`** — SQLite uses
-  type affinity, not fixed-point.
+- **Infix `numeric` arithmetic** — SQLite's `+`/`-`/`*`/`/` operators are float,
+  and can't be overridden. (`numeric` *storage* is exact, though — see Partial —
+  and `dec_add`/`dec_mul`/… give exact results explicitly.) `money` and enforced
+  scale aren't modeled.
 - **Session `TimeZone` display** — `timestamptz` works (stores a UTC instant,
   honors input offsets, `AT TIME ZONE` converts via the Go zone database), but
   output is always rendered in UTC (`+00`); `SET timezone` doesn't change the
@@ -241,6 +243,13 @@ These run so migrations, ORMs, and dumps proceed, but have no real effect:
   `INHERIT`/`CREATEROLE`/`BYPASSRLS`. Superusers and roles that were never
   `CREATE ROLE`'d bypass the checks, so existing single-user setups are
   unaffected.
+- **`numeric` / `decimal`** — stored as the exact decimal string in a `TEXT`
+  cell (so a value beyond float64 precision round-trips losslessly and the file
+  stays plain-SQLite readable), with numeric comparison/ordering via a `DECIMAL`
+  collation and exact `sum`/`avg` (via `math/big`). Caveat: infix `+`/`-`/`*`/`/`
+  still go through SQLite's float operators (call `dec_add`/`dec_sub`/`dec_mul`/
+  `dec_div`/`dec_round` for exact results), and `numeric(p,s)` scale isn't
+  enforced on write.
 - **Enum columns** — enforced via `TEXT` + `CHECK` and `\dT+` lists the
   elements, but there's no enum ordering/comparison.
 - **Composite types** — `CREATE TYPE … AS (…)` shows in `pg_type`/`\dT`, but the

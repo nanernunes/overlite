@@ -16,6 +16,7 @@ func rewrite(sql string) string {
 	sql = rewritePublicPrefix(sql)
 	sql = rewriteDistinctOn(sql)
 	sql = rewriteSerial(sql)
+	sql = rewriteNumericColumns(sql)
 	sql = rewriteNow(sql)
 	sql = rewriteTimestamptzLiteral(sql) // offset-bearing timestamp literal -> UTC
 	sql = rewriteAtTimeZone(sql)         // expr AT TIME ZONE 'zone'
