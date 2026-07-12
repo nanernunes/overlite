@@ -42,11 +42,13 @@ func (r schemaRef) master() string {
 	}
 	if r.Prefix == "" {
 		// public: bare-named tables, i.e. anything not owned by a registered
-		// schema (a "<schema>." prefix).
-		return `(SELECT rowid, type, name, tbl_name, sql FROM main.sqlite_master
-		  WHERE instr(name,'.')=0
+		// schema (a "<schema>." prefix). mm.name must be qualified: an
+		// unqualified `name` inside the EXISTS would bind to _overlite_schemas.
+		return `(SELECT mm.rowid AS rowid, mm.type AS type, mm.name AS name,
+		         mm.tbl_name AS tbl_name, mm.sql AS sql FROM main.sqlite_master mm
+		  WHERE instr(mm.name,'.')=0
 		     OR NOT EXISTS (SELECT 1 FROM _overlite_schemas s
-		                    WHERE s.name = substr(name,1,instr(name,'.')-1)))`
+		                    WHERE s.name = substr(mm.name,1,instr(mm.name,'.')-1)))`
 	}
 	// a schema: exactly the tables carrying its "<name>." prefix.
 	return `(SELECT rowid, type, name, tbl_name, sql FROM main.sqlite_master
@@ -161,7 +163,10 @@ func schemaRefs(schemas []string) []schemaRef {
 			PgName: name,
 			DB:     name,
 			NsOid:  3000000 + i + 1,
-			Offset: int64(i+1) * 1_000_000_000_000,
+			// Each schema gets a 200M-wide oid band. It must stay < 2^32 because
+			// pg_dump holds oids in a uint32 and would truncate a larger value,
+			// breaking its attrelid joins (empty CREATE TABLE). ~21 schemas fit.
+			Offset: int64(i+1) * 200_000_000,
 		}
 		if !schemaFilesMode {
 			r.DB = "main"
@@ -517,4 +522,91 @@ func (ss *sqliteSession) CreateSchema(ctx context.Context, name string, ifNotExi
 }
 func (ss *sqliteSession) DropSchema(ctx context.Context, name string, ifExists, cascade bool) error {
 	return dropSchema(ctx, ss.conn, ss.mainPath, name, ifExists, cascade)
+}
+
+func (s *SQLite) RenameSchema(ctx context.Context, o, n string) error {
+	return renameSchema(ctx, s.conn, s.mainPath, o, n)
+}
+func (ss *sqliteSession) RenameSchema(ctx context.Context, o, n string) error {
+	return renameSchema(ctx, ss.conn, ss.mainPath, o, n)
+}
+func (s *SQLite) SetTableSchema(ctx context.Context, ref, sch string) error {
+	return setTableSchema(ctx, s.conn, s.mainPath, ref, sch)
+}
+func (ss *sqliteSession) SetTableSchema(ctx context.Context, ref, sch string) error {
+	return setTableSchema(ctx, ss.conn, ss.mainPath, ref, sch)
+}
+
+// renameSchema renames a schema and every "old.<t>" table to "new.<t>" (single-
+// file mode). A transactional set of renames.
+func renameSchema(ctx context.Context, ce connExecutor, mainPath, oldName, newName string) error {
+	if strings.EqualFold(oldName, "public") || strings.EqualFold(newName, "public") {
+		return fmt.Errorf("cannot rename schema %q", "public")
+	}
+	if !validSchemaName(newName) {
+		return fmt.Errorf("invalid schema name %q", newName)
+	}
+	if schemaFilesMode {
+		return fmt.Errorf("ALTER SCHEMA ... RENAME is not supported in multi-file schema mode")
+	}
+	if !schemaRegistered(ctx, ce, oldName) {
+		return fmt.Errorf("schema %q does not exist", oldName)
+	}
+	if schemaRegistered(ctx, ce, newName) {
+		return fmt.Errorf("schema %q already exists", newName)
+	}
+	tables, err := schemaTables(ctx, ce, oldName)
+	if err != nil {
+		return err
+	}
+	for _, t := range tables {
+		nt := newName + t[len(oldName):] // swap the "<old>" prefix for "<new>"
+		if _, err := ce.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %q RENAME TO %q", t, nt)); err != nil {
+			return err
+		}
+	}
+	if _, err := ce.ExecContext(ctx,
+		"UPDATE _overlite_schemas SET name = ? WHERE name = ? COLLATE NOCASE", newName, oldName); err != nil {
+		return err
+	}
+	return rebuildCatalog(ctx, ce, mainPath)
+}
+
+// setTableSchema moves a table to another schema by renaming it (single-file
+// mode). SQLite's RENAME updates foreign keys/views/triggers that reference it.
+func setTableSchema(ctx context.Context, ce connExecutor, mainPath, tableRef, newSchema string) error {
+	if schemaFilesMode {
+		return fmt.Errorf("ALTER TABLE ... SET SCHEMA is not supported in multi-file schema mode")
+	}
+	srcSchema, name := splitSchemaRef(tableRef)
+	if !strings.EqualFold(newSchema, "public") && !schemaRegistered(ctx, ce, newSchema) {
+		return fmt.Errorf("schema %q does not exist", newSchema)
+	}
+	src := storedTableName(srcSchema, name)
+	dst := storedTableName(newSchema, name)
+	if src == dst {
+		return nil
+	}
+	if _, err := ce.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %q RENAME TO %q", src, dst)); err != nil {
+		return err
+	}
+	return rebuildCatalog(ctx, ce, mainPath)
+}
+
+// splitSchemaRef splits "schema.table" into its parts; a bare name is public.
+func splitSchemaRef(ref string) (schema, table string) {
+	ref = strings.Trim(strings.TrimSpace(ref), `"`)
+	if i := strings.IndexByte(ref, '.'); i >= 0 {
+		return ref[:i], ref[i+1:]
+	}
+	return "public", ref
+}
+
+// storedTableName is the SQLite table name for a (schema, table): bare in
+// public, "<schema>.<table>" otherwise.
+func storedTableName(schema, table string) string {
+	if schema == "" || strings.EqualFold(schema, "public") {
+		return table
+	}
+	return schema + "." + table
 }

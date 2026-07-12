@@ -3,6 +3,8 @@ package postgres
 import (
 	"fmt"
 	"strings"
+
+	"overlite/core"
 )
 
 // ALTER TABLE forms SQLite can't run natively. UNIQUE constraints become a real
@@ -38,8 +40,22 @@ func (s *session) tryAlterTable(sql string) (string, bool, error) {
 		}
 	case "ALTER":
 		return "ALTER TABLE", true, s.alterColumn(sql, table, rest[1:])
+	case "SET":
+		// ALTER TABLE t SET SCHEMA y — move the table between schemas.
+		if len(rest) >= 3 && strings.EqualFold(rest[1], "schema") {
+			return "ALTER TABLE", true, s.alterSetSchema(unquoteIdent(f[i]), unquoteIdent(rest[2]))
+		}
 	}
 	return "", false, nil
+}
+
+// alterSetSchema moves a table to another schema via the engine's SchemaManager.
+func (s *session) alterSetSchema(tableRef, newSchema string) error {
+	sm, ok := s.db.(core.SchemaManager)
+	if !ok {
+		return fmt.Errorf("schemas are not supported")
+	}
+	return sm.SetTableSchema(s.ctx, tableRef, newSchema)
 }
 
 // alterTableHandled reports whether tryAlterTable would take over this ALTER
@@ -62,6 +78,8 @@ func alterTableHandled(sql string) bool {
 		return hasWord(rest, "unique") && !hasWord(rest, "primary")
 	case "ALTER":
 		return true
+	case "SET":
+		return len(rest) >= 3 && strings.EqualFold(rest[1], "schema")
 	}
 	return false
 }

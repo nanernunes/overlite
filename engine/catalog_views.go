@@ -263,7 +263,7 @@ FROM @MASTER@ tbl JOIN pragma_index_list(tbl.name,'@DB@') il
 WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%' AND tbl.name NOT GLOB '_overlite_*'
   AND il.origin='u' AND il."unique"=1`
 
-const pgConstraintTmpl = `SELECT tbl.rowid*100000 + fk.id + @OFF@ AS oid, 'fk_' || tbl.name || '_' || fk.id AS conname,
+const pgConstraintTmpl = `SELECT tbl.rowid*100000 + fk.id + @OFF@ AS oid, 'fk_' || substr(tbl.name,@PLEN@) || '_' || fk.id AS conname,
  @NS@ AS connamespace, 'f' AS contype, 0 AS condeferrable, 0 AS condeferred, 1 AS convalidated,
  CAST(tbl.rowid + @OFF@ AS INTEGER) AS conrelid, 0 AS contypid, 0 AS conindid, 0 AS conparentid,
  CAST((SELECT rowid + @OFF@ FROM @MASTER@ WHERE name = fk."table" AND type='table') AS INTEGER) AS confrelid,
@@ -273,7 +273,7 @@ const pgConstraintTmpl = `SELECT tbl.rowid*100000 + fk.id + @OFF@ AS oid, 'fk_' 
 FROM @MASTER@ tbl JOIN pragma_foreign_key_list(tbl.name,'@DB@') fk
 WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%' AND tbl.name NOT GLOB '_overlite_*'
 UNION ALL
-SELECT tbl.rowid*100000 + 99999 + @OFF@, tbl.name || '_pkey', @NS@, 'p', 0,0,1,
+SELECT tbl.rowid*100000 + 99999 + @OFF@, substr(tbl.name,@PLEN@) || '_pkey', @NS@, 'p', 0,0,1,
  CAST(tbl.rowid + @OFF@ AS INTEGER), 0, CAST(tbl.rowid + 90000000 + @OFF@ AS INTEGER), 0, 0,
  ' ',' ',' ', 1,0,1, '','',NULL,
  (SELECT group_concat(name,', ') FROM pragma_table_info(tbl.name,'@DB@') WHERE pk>0 ORDER BY pk), NULL
@@ -282,7 +282,7 @@ WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%' AND tbl.name NOT GLOB '_
   AND EXISTS(SELECT 1 FROM pragma_table_info(tbl.name,'@DB@') WHERE pk>0)
 UNION ALL
 SELECT tbl.rowid*100000 + 88000 + il.seq + @OFF@,
- tbl.name || '_' || (SELECT ii.name FROM pragma_index_info(il.name,'@DB@') ii WHERE ii.seqno=0) || '_key', @NS@, 'u', 0,0,1,
+ substr(tbl.name,@PLEN@) || '_' || (SELECT ii.name FROM pragma_index_info(il.name,'@DB@') ii WHERE ii.seqno=0) || '_key', @NS@, 'u', 0,0,1,
  CAST(tbl.rowid + @OFF@ AS INTEGER), 0, CAST(tbl.rowid*1000 + il.seq + 84000000 + @OFF@ AS INTEGER), 0, 0,
  ' ',' ',' ', 1,0,1, '','',NULL,
  (SELECT group_concat(ii.name,', ') FROM pragma_index_info(il.name,'@DB@') ii), NULL

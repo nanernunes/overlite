@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"regexp"
 	"strings"
 	"sync"
 )
@@ -42,7 +43,38 @@ func qualifySchemaNames(query string) string {
 	for _, s := range schemas {
 		query = qualifyOneSchema(query, s)
 	}
-	return query
+	return prefixSchemaIndexName(query)
+}
+
+// reCreateIndex captures a CREATE INDEX's index name and its (already-qualified)
+// target table.
+var reCreateIndex = regexp.MustCompile(
+	`(?is)^(\s*CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?)("[^"]+"|[A-Za-z_]\w*)(\s+ON\s+)("[^"]+")`)
+
+// prefixSchemaIndexName gives an index on a schema table the same "<schema>."
+// prefix as the table, so it belongs to that schema (and pg_index/\d find it).
+// The target has already been rewritten to "<schema>.<table>" by this point.
+func prefixSchemaIndexName(query string) string {
+	m := reCreateIndex.FindStringSubmatch(query)
+	if m == nil {
+		return query
+	}
+	schema, _ := splitStoredName(strings.Trim(m[4], `"`))
+	if schema == "" {
+		return query // target isn't schema-qualified: index stays in public
+	}
+	idx := strings.Trim(m[2], `"`)
+	newName := `"` + schema + "." + idx + `"`
+	return m[1] + newName + m[3] + m[4] + query[len(m[0]):]
+}
+
+// splitStoredName splits a stored table name "schema.table" into its parts; a
+// name without a dot has an empty schema.
+func splitStoredName(name string) (schema, table string) {
+	if i := strings.IndexByte(name, '.'); i >= 0 {
+		return name[:i], name[i+1:]
+	}
+	return "", name
 }
 
 func qualifyOneSchema(sql, schema string) string {

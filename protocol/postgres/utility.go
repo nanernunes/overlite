@@ -197,6 +197,12 @@ func (s *session) trySchemaDDL(sql string) (tag string, handled bool, err error)
 	case "DROP":
 		name, ifExists, cascade := parseDropSchema(rest)
 		return "DROP SCHEMA", true, sm.DropSchema(s.ctx, name, ifExists, cascade)
+	case "ALTER":
+		// ALTER SCHEMA x RENAME TO y
+		if len(rest) >= 4 && strings.EqualFold(rest[1], "rename") && strings.EqualFold(rest[2], "to") {
+			return "ALTER SCHEMA", true, sm.RenameSchema(s.ctx, unquoteIdent(rest[0]), unquoteIdent(rest[3]))
+		}
+		return "ALTER SCHEMA", true, nil // OWNER TO / other: accept as no-op
 	}
 	return "", false, nil
 }

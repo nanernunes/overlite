@@ -100,4 +100,9 @@ type SchemaManager interface {
 	// transaction block (true when schemas are name-prefixed tables in one file;
 	// false when each schema is a separate attached file and ATTACH can't).
 	SchemaDDLTransactional() bool
+	// RenameSchema renames a schema (and every table it holds).
+	RenameSchema(ctx context.Context, oldName, newName string) error
+	// SetTableSchema moves a table to another schema. tableRef is the possibly
+	// schema-qualified source name ("x.t" or "t").
+	SetTableSchema(ctx context.Context, tableRef, newSchema string) error
 }

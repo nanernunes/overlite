@@ -30,6 +30,7 @@ func rewrite(sql string) string {
 	sql = rewriteNiladicFuncs(sql)
 	sql = rewriteInformationSchema(sql)
 	sql = rewriteObjDescription(sql) // obj_description/col_description -> pg_description lookup
+	sql = rewriteIndexUsing(sql)     // strip "USING <method>" from CREATE INDEX (pg_dump emits it)
 	sql = rewriteOperatorSyntax(sql)        // unwrap OPERATOR(=)/OPERATOR(~) before ANY/regex handling
 	sql = rewriteArrayToStringSubquery(sql) // before ARRAY(subquery) is unwrapped
 	sql = rewriteArraySubquery(sql)
@@ -55,6 +56,22 @@ func rewrite(sql string) string {
 	sql = rewriteTrimFrom(sql)
 	sql = rewriteMatchOperators(sql)
 	return sql
+}
+
+// reIndexUsing matches the access-method clause "USING <method>" that pg_dump
+// puts in a CREATE INDEX (SQLite has no such clause and only btree anyway).
+var reIndexUsing = regexp.MustCompile(`(?i)\bUSING\s+\w+\s+(\()`)
+
+// rewriteIndexUsing drops "USING btree" (etc.) from a CREATE INDEX so it runs on
+// SQLite, e.g. restoring a pg_dump.
+func rewriteIndexUsing(sql string) string {
+	if !strings.EqualFold(firstWordUpper(sql), "CREATE") {
+		return sql
+	}
+	if u := strings.ToUpper(sql); !strings.Contains(u, "INDEX") {
+		return sql
+	}
+	return reIndexUsing.ReplaceAllString(sql, "$1")
 }
 
 // rewriteObjDescription turns obj_description(oid,'cat') / col_description(oid,
@@ -1637,7 +1654,8 @@ func rewriteObjectDefs(sql string) string {
 		// finds " USING " to render its \d index line.
 		return "(SELECT 'CREATE ' || CASE WHEN ix.indisunique THEN 'UNIQUE ' ELSE '' END || 'INDEX '" +
 			" || (SELECT relname FROM pg_class WHERE oid = ix.indexrelid)" +
-			" || ' ON ' || (SELECT relname FROM pg_class WHERE oid = ix.indrelid)" +
+			" || ' ON ' || (SELECT CASE WHEN n.nspname='public' THEN c.relname ELSE n.nspname||'.'||c.relname END" +
+			"               FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.oid = ix.indrelid)" +
 			" || ' USING btree (' || ix.ov_cols || ')'" +
 			" FROM pg_index ix WHERE ix.indexrelid = " + a + ")"
 	})
