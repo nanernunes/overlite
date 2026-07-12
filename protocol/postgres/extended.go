@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
 
 	"overlite/core"
 )
@@ -54,6 +55,16 @@ type session struct {
 	// bypassCache memoizes whether a role skips privilege checks (superuser or
 	// unmanaged), keyed by role name; cleared on role DDL.
 	bypassCache map[string]bool
+
+	// LISTEN/NOTIFY state. pid is this backend's id (sent in a Notificationsent);
+	// listens is the set of channels; pending holds notifications to flush; idle
+	// is true when the session is between commands (safe to deliver). nmu guards
+	// pending/idle and serializes connection writes with a NOTIFYing goroutine.
+	pid     int32
+	listens map[string]bool
+	pending []pgNotify
+	idle    bool
+	nmu     sync.Mutex
 }
 
 type prepared struct {
@@ -78,6 +89,8 @@ type prepared struct {
 	rlsDDL string
 	// alterDDL holds a raw ALTER TABLE we implement (rebuild / unique index).
 	alterDDL string
+	// listenNotify holds a raw LISTEN/UNLISTEN/NOTIFY statement.
+	listenNotify string
 }
 
 type portal struct {
@@ -92,7 +105,7 @@ type portal struct {
 	pos    int
 }
 
-func newSession(ctx context.Context, c *wireConn, db core.Session, user string) *session {
+func newSession(ctx context.Context, c *wireConn, db core.Session, user string, pid int32) *session {
 	if user == "" {
 		user = "postgres"
 	}
@@ -107,6 +120,8 @@ func newSession(ctx context.Context, c *wireConn, db core.Session, user string) 
 		authUser:    user,
 		sessionUser: user,
 		currentRole: user,
+		pid:         pid,
+		listens:     map[string]bool{},
 	}
 }
 
@@ -215,8 +230,10 @@ func (s *session) abortedTxError() bool { return s.tx != nil && s.txFailed }
 
 // loop reads and dispatches frontend messages until the client disconnects.
 func (s *session) loop() error {
-	// A client that drops mid-transaction leaves it uncommitted; roll it back.
+	// A client that drops mid-transaction leaves it uncommitted; roll it back,
+	// and stop receiving notifications.
 	defer func() {
+		unregisterAll(s)
 		if s.tx != nil {
 			_ = s.tx.Rollback()
 			s.tx = nil
@@ -231,6 +248,7 @@ func (s *session) loop() error {
 			}
 			return err
 		}
+		s.goBusy() // a NOTIFY may only write to the connection while we're idle
 
 		switch typ {
 		case msgQuery:
@@ -244,6 +262,7 @@ func (s *session) loop() error {
 			if err := s.c.flush(); err != nil {
 				return err
 			}
+			s.goIdle()
 
 		case msgParse, msgBind, msgDescribe, msgExecute, msgClose:
 			// Extended request cycle: buffer responses, no ReadyForQuery until
@@ -263,6 +282,7 @@ func (s *session) loop() error {
 			if err := s.c.flush(); err != nil {
 				return err
 			}
+			s.goIdle()
 
 		case msgFlush:
 			if err := s.c.flush(); err != nil {
@@ -322,6 +342,10 @@ func (s *session) handleParse(body []byte) error {
 	}
 	if alterTableHandled(raw) {
 		s.prepared[name] = &prepared{alterDDL: raw}
+		return s.c.send(msgParseComplete, nil)
+	}
+	if isListenNotify(raw) {
+		s.prepared[name] = &prepared{listenNotify: raw}
 		return s.c.send(msgParseComplete, nil)
 	}
 	if rs, ok := interceptUtility(raw); ok {
@@ -409,7 +433,7 @@ func (s *session) handleDescribe(body []byte) error {
 		if prep == nil {
 			return s.protoError("26000", "unknown prepared statement "+quoteName(name))
 		}
-		if prep.util != nil || prep.txControl != "" || prep.seqDDL != "" || prep.typeDDL != "" || prep.setRole != "" || prep.grant != "" || prep.rlsDDL != "" || prep.alterDDL != "" {
+		if prep.util != nil || prep.txControl != "" || prep.seqDDL != "" || prep.typeDDL != "" || prep.setRole != "" || prep.grant != "" || prep.rlsDDL != "" || prep.alterDDL != "" || prep.listenNotify != "" {
 			if err := s.c.sendParameterDescription(0); err != nil {
 				return err
 			}
@@ -427,7 +451,7 @@ func (s *session) handleDescribe(body []byte) error {
 			return s.protoError("34000", "unknown portal "+quoteName(name))
 		}
 		prep = pt.prep
-		if prep.util != nil || prep.txControl != "" || prep.seqDDL != "" || prep.typeDDL != "" || prep.setRole != "" || prep.grant != "" || prep.rlsDDL != "" || prep.alterDDL != "" {
+		if prep.util != nil || prep.txControl != "" || prep.seqDDL != "" || prep.typeDDL != "" || prep.setRole != "" || prep.grant != "" || prep.rlsDDL != "" || prep.alterDDL != "" || prep.listenNotify != "" {
 			return s.sendUtilDescribe(prep.util)
 		}
 		args = pt.params
@@ -549,6 +573,11 @@ func (s *session) handleExecute(body []byte) error {
 			}
 			return s.protoExecError(err)
 		}
+		return s.c.sendCommandComplete(tag)
+	}
+
+	if pt.prep.listenNotify != "" {
+		tag, _ := s.tryListenNotify(pt.prep.listenNotify)
 		return s.c.sendCommandComplete(tag)
 	}
 

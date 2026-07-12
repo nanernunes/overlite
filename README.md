@@ -109,12 +109,12 @@ schemas: `public`, `sales`, `audit`.
 High level, at a glance — including what's still needed to be **Postgres-ready
 for a real production system**. ✅ done · 🟡 partial · ⬜ not yet.
 
-Across the full feature matrix — **153 items: ✅ 129 · 🟡 22 · ⬜ 2**
-(84% done, 99% at least partial):
+Across the full feature matrix — **153 items: ✅ 130 · 🟡 21 · ⬜ 2**
+(85% done, 99% at least partial):
 
 | Area | ✅ | 🟡 | ⬜ |
 |---|--:|--:|--:|
-| Wire protocol | 13 | 1 | 0 |
+| Wire protocol | 14 | 0 | 0 |
 | Authentication | 9 | 0 | 0 |
 | DML (queries) | 11 | 2 | 0 |
 | DDL (schema) | 26 | 8 | 0 |
@@ -150,7 +150,7 @@ Across the full feature matrix — **153 items: ✅ 129 · 🟡 22 · ⬜ 2**
 | Query cancellation | ✅ | `CancelRequest` interrupts a running query |
 | Rich types | 🟡 | arrays, `hstore`, and range types supported (stored as JSON/text); geometric/network not yet; `interval` arithmetic partial |
 | Extensions | 🟡 | `CREATE EXTENSION` accepted as a no-op; common functions provided directly |
-| `LISTEN`/`NOTIFY` | 🟡 | accepted as no-ops (no delivery) |
+| `LISTEN`/`NOTIFY` | ✅ | real in-memory pub/sub across sessions on the same server |
 | Replication / HA | ⬜ | |
 
 Everything marked ✅ is exercised end-to-end against real `psql` and pgx
@@ -196,7 +196,7 @@ These would require emulating features SQLite fundamentally lacks:
   Everything backed by real data *is* populated, though: `pg_auth_members`
   (role membership → `\du`/`\drg`), `pg_policy` + `pg_class.relrowsecurity`
   (RLS in `\d`), and `pg_depend`/`pg_shdepend` (object dependencies & ownership).
-- No `LISTEN`/`NOTIFY` delivery, and no replication / HA.
+- No replication / HA.
 
 ### Accepted but not enforced (no-ops)
 
@@ -205,7 +205,6 @@ These run so migrations, ORMs, and dumps proceed, but have no real effect:
 - **`COMMENT ON`** — accepted, not stored.
 - **`CREATE`/`DROP EXTENSION`** — the common functions (e.g. `gen_random_uuid`)
   are provided directly.
-- **`LISTEN` / `UNLISTEN` / `NOTIFY`** — no message delivery.
 - **`SET`/`BEGIN ISOLATION LEVEL`** — SQLite serializes writes; levels have no
   effect.
 - **`ALTER … OWNER TO`, `ALTER SCHEMA`** — the creating role owns its tables

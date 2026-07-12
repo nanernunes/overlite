@@ -39,6 +39,7 @@ const (
 	msgCloseComplete        = '3'
 	msgParameterDescription = 't'
 	msgNoData               = 'n'
+	msgNotification         = 'A' // NotificationResponse (LISTEN/NOTIFY)
 	msgCopyInResponse       = 'G'
 	msgCopyOutResponse      = 'H'
 	msgCopyData             = 'd' // both directions

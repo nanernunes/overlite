@@ -103,7 +103,7 @@ func (p *Protocol) Serve(ctx context.Context, conn net.Conn, engine core.Engine)
 
 	// Assign this connection a backend key so a second connection can cancel
 	// its running query.
-	pid, secret := randInt32(), randInt32()
+	pid, secret := randInt32()&0x7fffffff, randInt32() // a positive backend pid
 	cl := registerBackend(pid, secret)
 	defer unregisterBackend(pid, secret)
 
@@ -111,7 +111,7 @@ func (p *Protocol) Serve(ctx context.Context, conn net.Conn, engine core.Engine)
 		return err
 	}
 
-	s := newSession(ctx, c, db, params["user"])
+	s := newSession(ctx, c, db, params["user"], pid)
 	s.canceler = cl
 	return s.loop()
 }
@@ -417,6 +417,10 @@ func (s *session) handleSimpleQuery(body []byte) error {
 			}
 			return s.sendExecError(err)
 		}
+		return s.c.sendCommandComplete(tag)
+	}
+
+	if tag, handled := s.tryListenNotify(sql); handled {
 		return s.c.sendCommandComplete(tag)
 	}
 

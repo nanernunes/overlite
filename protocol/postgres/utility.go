@@ -43,7 +43,7 @@ func logQueryError(phase string, err error, original, rewritten string) {
 func interceptUtility(sql string) (*core.ResultSet, bool) {
 	w := firstWordUpper(sql)
 	switch w {
-	case "SET", "RESET", "DISCARD", "LISTEN", "UNLISTEN", "NOTIFY", "DEALLOCATE",
+	case "SET", "RESET", "DISCARD", "DEALLOCATE",
 		"LOAD", "CHECKPOINT", "CLUSTER", "ANALYZE", "LOCK",
 		"COMMENT": // no catalog comments yet; accept so migrations/dumps run
 		return &core.ResultSet{Command: w}, true
