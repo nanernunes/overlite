@@ -44,6 +44,7 @@ func rewrite(sql string) string {
 	sql = rewriteArrayCastDrop(sql) // expr::type[] -> expr (value already JSON)
 	sql = rewriteCasts(sql)
 	sql = rewriteJSONContains(sql) // after casts, so "x::jsonb @> ..." operands are whole
+	sql = rewriteJSONExists(sql)   // ? / ?| / ?& -> jsonb_exists*(), after arrays are json_array(…)
 	sql = rewriteArraySubscript(sql)
 	sql = rewriteObjectDefs(sql)
 	sql = rewriteCollate(sql)
@@ -798,6 +799,65 @@ func rewriteJSONContains(sql string) string {
 		}
 		sql = sql[:ls] + repl + sql[re:]
 	}
+}
+
+// rewriteJSONExists maps the jsonb key-existence operators `?` / `?|` / `?&`
+// onto engine functions, before SQLite mistakes `?` for a bind parameter.
+func rewriteJSONExists(sql string) string {
+	for {
+		idx, op := indexJSONExists(sql)
+		if idx < 0 {
+			return sql
+		}
+		ls, le := operandBefore(sql, idx)
+		rs, re := operandAfter(sql, idx+len(op))
+		if ls == le || rs == re {
+			return sql
+		}
+		// Include a function call's argument list (operandAfter stops at the "(").
+		for re < len(sql) {
+			p := re
+			for p < len(sql) && (sql[p] == ' ' || sql[p] == '\t') {
+				p++
+			}
+			if p < len(sql) && sql[p] == '(' {
+				_, re = balancedParen(sql, p)
+				continue
+			}
+			break
+		}
+		fn := "jsonb_exists"
+		switch op {
+		case "?|":
+			fn = "jsonb_exists_any"
+		case "?&":
+			fn = "jsonb_exists_all"
+		}
+		sql = sql[:ls] + fn + "(" + sql[ls:le] + ", " + sql[rs:re] + ")" + sql[re:]
+	}
+}
+
+// indexJSONExists finds the first ? / ?| / ?& operator outside a string literal.
+func indexJSONExists(sql string) (int, string) {
+	inStr := false
+	for i := 0; i < len(sql); i++ {
+		switch sql[i] {
+		case '\'':
+			inStr = !inStr
+		case '?':
+			if inStr {
+				continue
+			}
+			if i+1 < len(sql) && sql[i+1] == '|' {
+				return i, "?|"
+			}
+			if i+1 < len(sql) && sql[i+1] == '&' {
+				return i, "?&"
+			}
+			return i, "?"
+		}
+	}
+	return -1, ""
 }
 
 // indexJSONContain finds the first @> or <@ operator outside a string literal.

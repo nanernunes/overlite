@@ -109,8 +109,8 @@ schemas: `public`, `sales`, `audit`.
 High level, at a glance — including what's still needed to be **Postgres-ready
 for a real production system**. ✅ done · 🟡 partial · ⬜ not yet.
 
-Across the full feature matrix — **152 items: ✅ 127 · 🟡 18 · ⬜ 7**
-(84% done, 95% at least partial):
+Across the full feature matrix — **152 items: ✅ 128 · 🟡 18 · ⬜ 6**
+(84% done, 96% at least partial):
 
 | Area | ✅ | 🟡 | ⬜ |
 |---|--:|--:|--:|
@@ -122,7 +122,7 @@ Across the full feature matrix — **152 items: ✅ 127 · 🟡 18 · ⬜ 7**
 | Transactions | 7 | 1 | 1 |
 | Schemas (multi-file) | 6 | 1 | 0 |
 | Catalog / introspection | 20 | 2 | 1 |
-| Functions & dialect | 19 | 2 | 1 |
+| Functions & dialect | 20 | 2 | 0 |
 | Tooling (psql/pg_dump/GUIs) | 6 | 1 | 0 |
 
 | Area | Status | Notes |
@@ -133,7 +133,7 @@ Across the full feature matrix — **152 items: ✅ 127 · 🟡 18 · ⬜ 7**
 | Transactions | ✅ | real `BEGIN`/`COMMIT`/`ROLLBACK` with aborted-tx semantics |
 | Schemas | ✅ | one file per schema, `CREATE`/`DROP`, auto-discovery |
 | Core types | ✅ | int/text/real/bool/bytea, date/time, `SERIAL`, `json`/`jsonb` |
-| JSON | ✅ | `->` `->>` `#>` `#>>` and the `json1` functions |
+| JSON | ✅ | `->` `->>` `#>` `#>>`, containment `@>`/`<@`, key-existence `?`/`?|`/`?&`, and the `json1` functions |
 | COPY / bulk load | ✅ | `FROM STDIN` / `TO STDOUT`, `\copy` (text & CSV) |
 | Introspection | ✅ | `pg_catalog` + `information_schema` (psql `\dt`/`\d`/`\l`, GUIs) |
 | Authentication | ✅ | trust, `POSTGRES_PASSWORD` with SCRAM-SHA-256 (default)/md5/cleartext, TLS, and per-connection `pg_hba` (conf or YAML) |
@@ -188,8 +188,6 @@ These would require emulating features SQLite fundamentally lacks:
 - **`LATERAL` joins.**
 - **`CREATE`/`DROP SCHEMA` inside a transaction** — schemas are attached files
   and `ATTACH` can't run in a SQLite transaction.
-- **JSON key-existence operators `?`, `?|`, `?&`** — `?` collides with the
-  parameter placeholder (containment `@>` / `<@` *is* supported).
 - **`SERIAL` in `pg_dump`** dumps as plain `integer` — on disk it is
   `AUTOINCREMENT`, not a sequence.
 

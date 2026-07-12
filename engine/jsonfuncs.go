@@ -2,8 +2,62 @@ package engine
 
 import (
 	"encoding/json"
+	"fmt"
 	"reflect"
 )
+
+// jsonbExists backs the jsonb `?` operator: does key exist as a top-level object
+// key, or (for an array) as a string element?
+func jsonbExists(j, key string) bool {
+	var v any
+	if json.Unmarshal([]byte(j), &v) != nil {
+		return false
+	}
+	switch t := v.(type) {
+	case map[string]any:
+		_, ok := t[key]
+		return ok
+	case []any:
+		for _, e := range t {
+			if s, ok := e.(string); ok && s == key {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// jsonbExistsAny / jsonbExistsAll back `?|` / `?&`; keys arrives as a JSON array.
+func jsonbExistsAny(j, keysJSON string) bool {
+	for _, k := range jsonStrArray(keysJSON) {
+		if jsonbExists(j, k) {
+			return true
+		}
+	}
+	return false
+}
+
+func jsonbExistsAll(j, keysJSON string) bool {
+	keys := jsonStrArray(keysJSON)
+	for _, k := range keys {
+		if !jsonbExists(j, k) {
+			return false
+		}
+	}
+	return true
+}
+
+func jsonStrArray(s string) []string {
+	var arr []any
+	if json.Unmarshal([]byte(s), &arr) != nil {
+		return nil
+	}
+	out := make([]string, len(arr))
+	for i, e := range arr {
+		out[i] = fmt.Sprint(e)
+	}
+	return out
+}
 
 // jsonbContains implements Postgres' jsonb @> jsonb (does a contain b?). Both
 // arguments are JSON text; it backs the json_contains() scalar the dialect layer

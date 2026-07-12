@@ -323,6 +323,31 @@ var registerCatalog = sync.OnceFunc(func() {
 		}
 		return int64(0), nil
 	})
+	// jsonb key existence (? / ?| / ?&, rewritten from those operators).
+	boolFn := func(b bool) driver.Value {
+		if b {
+			return int64(1)
+		}
+		return int64(0)
+	}
+	scalar("jsonb_exists", 2, func(a []driver.Value) (driver.Value, error) {
+		if len(a) < 2 || a[0] == nil || a[1] == nil {
+			return int64(0), nil
+		}
+		return boolFn(jsonbExists(fmt.Sprint(a[0]), fmt.Sprint(a[1]))), nil
+	})
+	scalar("jsonb_exists_any", 2, func(a []driver.Value) (driver.Value, error) {
+		if len(a) < 2 || a[0] == nil || a[1] == nil {
+			return int64(0), nil
+		}
+		return boolFn(jsonbExistsAny(fmt.Sprint(a[0]), fmt.Sprint(a[1]))), nil
+	})
+	scalar("jsonb_exists_all", 2, func(a []driver.Value) (driver.Value, error) {
+		if len(a) < 2 || a[0] == nil || a[1] == nil {
+			return int64(0), nil
+		}
+		return boolFn(jsonbExistsAll(fmt.Sprint(a[0]), fmt.Sprint(a[1]))), nil
+	})
 
 	// Date/time functions (now()/extract are handled in the dialect layer).
 	scalar("date_trunc", 2, dateTruncFn)
