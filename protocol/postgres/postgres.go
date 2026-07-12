@@ -113,6 +113,11 @@ func (p *Protocol) Serve(ctx context.Context, conn net.Conn, engine core.Engine)
 
 	s := newSession(ctx, c, db, params["user"], pid)
 	s.canceler = cl
+	// Honor a search_path given at connection time (startup parameter or
+	// options=-c search_path=...), as drivers and PGOPTIONS do.
+	if sp := startupSearchPath(params); sp != nil {
+		s.searchPath = sp
+	}
 	return s.loop()
 }
 
@@ -488,6 +493,16 @@ func (s *session) handleSimpleQuery(body []byte) error {
 
 	if cs, ok := parseCopy(sql); ok {
 		return s.handleCopy(cs)
+	}
+
+	if rs, ok := s.trySearchPath(sql); ok {
+		if rs != nil {
+			if err := s.c.sendResultSet(rs); err != nil {
+				return err
+			}
+			return s.c.sendCommandComplete(commandTag(rs))
+		}
+		return s.c.sendCommandComplete("SET")
 	}
 
 	if rs, ok := interceptUtility(sql); ok {

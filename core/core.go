@@ -14,6 +14,14 @@ import "context"
 // to encode it on their wire.
 type Value = any
 
+// ctxKey is the private type for context keys defined by this package.
+type ctxKey int
+
+// SearchPathKey carries the session's schema search_path ([]string) through the
+// context, so the engine can resolve unqualified names in single-file mode. A
+// protocol sets it per statement; absence means the default ("public").
+const SearchPathKey ctxKey = iota
+
 // Column describes one output column.
 type Column struct {
 	Name string

@@ -52,6 +52,11 @@ type session struct {
 	sessionUser string
 	currentRole string
 
+	// searchPath is the schema resolution order set by SET search_path (nil =
+	// the default, "public"). It's threaded to the engine via the context so
+	// unqualified names resolve per the path in single-file mode.
+	searchPath []string
+
 	// bypassCache memoizes whether a role skips privilege checks (superuser or
 	// unmanaged), keyed by role name; cleared on role DDL.
 	bypassCache map[string]bool
@@ -93,6 +98,8 @@ type prepared struct {
 	listenNotify string
 	// comment holds a raw COMMENT ON statement.
 	comment string
+	// searchPathStmt holds a raw SET/SHOW/RESET search_path statement.
+	searchPathStmt string
 }
 
 type portal struct {
@@ -157,7 +164,7 @@ func (s *session) exec(sql string, args []core.Value) (*core.ResultSet, error) {
 // armCancel derives a cancellable context from the session and registers its
 // cancel with the connection's canceler for the duration of one statement.
 func (s *session) armCancel() (context.Context, context.CancelFunc) {
-	ctx, cancel := context.WithCancel(s.ctx)
+	ctx, cancel := context.WithCancel(s.withSearchPath(s.ctx))
 	if s.canceler != nil {
 		s.canceler.arm(cancel)
 	}
@@ -169,11 +176,21 @@ func (s *session) armCancel() (context.Context, context.CancelFunc) {
 	}
 }
 
-func (s *session) describeSQL(sql string, args []core.Value) ([]core.Column, error) {
-	if s.tx != nil {
-		return s.tx.Describe(s.ctx, sql, args)
+// withSearchPath attaches the session's search_path to a context so the engine
+// can resolve unqualified names.
+func (s *session) withSearchPath(ctx context.Context) context.Context {
+	if s.searchPath == nil {
+		return ctx
 	}
-	return s.db.Describe(s.ctx, sql, args)
+	return context.WithValue(ctx, core.SearchPathKey, s.searchPath)
+}
+
+func (s *session) describeSQL(sql string, args []core.Value) ([]core.Column, error) {
+	ctx := s.withSearchPath(s.ctx)
+	if s.tx != nil {
+		return s.tx.Describe(ctx, sql, args)
+	}
+	return s.db.Describe(ctx, sql, args)
 }
 
 // readyForQuery reports the transaction status: 'I' idle, 'T' in a transaction,
@@ -354,6 +371,15 @@ func (s *session) handleParse(body []byte) error {
 		s.prepared[name] = &prepared{comment: raw}
 		return s.c.send(msgParseComplete, nil)
 	}
+	if isSearchPathStmt(raw) {
+		if strings.EqualFold(firstWordUpper(raw), "SHOW") {
+			rs, _ := s.trySearchPath(raw) // SHOW: no mutation; bake the current value
+			s.prepared[name] = &prepared{util: rs}
+		} else {
+			s.prepared[name] = &prepared{searchPathStmt: raw} // SET/RESET: mutate at Execute
+		}
+		return s.c.send(msgParseComplete, nil)
+	}
 	if rs, ok := interceptUtility(raw); ok {
 		s.prepared[name] = &prepared{util: rs}
 		return s.c.send(msgParseComplete, nil)
@@ -439,7 +465,7 @@ func (s *session) handleDescribe(body []byte) error {
 		if prep == nil {
 			return s.protoError("26000", "unknown prepared statement "+quoteName(name))
 		}
-		if prep.util != nil || prep.txControl != "" || prep.seqDDL != "" || prep.typeDDL != "" || prep.setRole != "" || prep.grant != "" || prep.rlsDDL != "" || prep.alterDDL != "" || prep.listenNotify != "" || prep.comment != "" {
+		if prep.util != nil || prep.txControl != "" || prep.seqDDL != "" || prep.typeDDL != "" || prep.setRole != "" || prep.grant != "" || prep.rlsDDL != "" || prep.alterDDL != "" || prep.listenNotify != "" || prep.comment != "" || prep.searchPathStmt != "" {
 			if err := s.c.sendParameterDescription(0); err != nil {
 				return err
 			}
@@ -457,7 +483,7 @@ func (s *session) handleDescribe(body []byte) error {
 			return s.protoError("34000", "unknown portal "+quoteName(name))
 		}
 		prep = pt.prep
-		if prep.util != nil || prep.txControl != "" || prep.seqDDL != "" || prep.typeDDL != "" || prep.setRole != "" || prep.grant != "" || prep.rlsDDL != "" || prep.alterDDL != "" || prep.listenNotify != "" || prep.comment != "" {
+		if prep.util != nil || prep.txControl != "" || prep.seqDDL != "" || prep.typeDDL != "" || prep.setRole != "" || prep.grant != "" || prep.rlsDDL != "" || prep.alterDDL != "" || prep.listenNotify != "" || prep.comment != "" || prep.searchPathStmt != "" {
 			return s.sendUtilDescribe(prep.util)
 		}
 		args = pt.params
@@ -593,6 +619,21 @@ func (s *session) handleExecute(body []byte) error {
 			return s.protoExecError(err)
 		}
 		return s.c.sendCommandComplete(tag)
+	}
+
+	if pt.prep.searchPathStmt != "" {
+		rs, _ := s.trySearchPath(pt.prep.searchPathStmt)
+		if rs != nil {
+			oids := make([]uint32, len(rs.Columns))
+			for i, col := range rs.Columns {
+				oids[i] = oidForColumn(col, rs.Rows, i)
+			}
+			if err := s.c.sendDataRows(rs.Rows, oids, pt.formats); err != nil {
+				return err
+			}
+			return s.c.sendCommandComplete(commandTag(rs))
+		}
+		return s.c.sendCommandComplete("SET")
 	}
 
 	if u := pt.prep.util; u != nil {

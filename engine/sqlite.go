@@ -144,6 +144,7 @@ func (t *sqliteTx) Rollback() error { return t.tx.Rollback() }
 
 func execute(ctx context.Context, q querier, query string, args []core.Value) (*core.ResultSet, error) {
 	query = qualifySchemaNames(query)
+	query = resolveSearchPath(ctx, q, query)
 	cmd := leadingCommand(query)
 	if isQuery(query) {
 		return doQuery(ctx, q, query, args, cmd)
@@ -218,6 +219,7 @@ func (s *SQLite) Describe(ctx context.Context, query string, args []core.Value) 
 
 func describe(ctx context.Context, q querier, query string, args []core.Value) ([]core.Column, error) {
 	query = qualifySchemaNames(query)
+	query = resolveSearchPath(ctx, q, query)
 	introSQL, ok := introspectionSQL(query)
 	if !ok {
 		return nil, nil // statement produces no rows
