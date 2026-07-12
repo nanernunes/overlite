@@ -133,38 +133,9 @@ Across the full feature matrix — **157 items: ✅ 141 · 🟡 15 · ⬜ 1**
 | Functions & dialect | 21 | 1 | 0 |
 | Tooling (psql/pg_dump/GUIs) | 6 | 1 | 0 |
 
-| Area | Status | Notes |
-|---|---|---|
-| Wire protocol | ✅ | simple & extended, prepared statements, text/binary |
-| SQL (DML) | ✅ | CRUD, joins, CTEs, window functions, upsert, `RETURNING`, `LATERAL` (over set-returning functions) |
-| DDL | ✅ | tables, indexes, views, foreign keys |
-| Transactions | ✅ | real `BEGIN`/`COMMIT`/`ROLLBACK` with aborted-tx semantics |
-| Schemas | ✅ | single-file by default (schema = name-prefixed tables; transactional `CREATE`/`DROP`, `SET SCHEMA`/`RENAME`, cross-schema FKs, `search_path`); file-per-schema mode via `OVERLITE_MULTITENANT_SCHEMA` |
-| Core types | ✅ | int/text/real/bool/bytea, date/time, `SERIAL`, `json`/`jsonb` |
-| JSON | ✅ | `->` `->>` `#>` `#>>`, containment `@>`/`<@`, key-existence `?`/`?|`/`?&`, and the `json1` functions |
-| COPY / bulk load | ✅ | `FROM STDIN` / `TO STDOUT`, `\copy` (text & CSV) |
-| Introspection | ✅ | `pg_catalog` + `information_schema` (psql `\dt`/`\d`/`\l`, GUIs) |
-| Authentication | ✅ | trust, `POSTGRES_PASSWORD` with SCRAM-SHA-256 (default)/md5/cleartext, TLS, and per-connection `pg_hba` (conf or YAML) |
-| Concurrency | ✅ | dedicated connection per client; reads run in parallel, writes serialize (SQLite single-writer) |
-| Migrations (`ALTER TABLE`) | ✅ | add/drop/rename column, `ALTER COLUMN TYPE`/`NOT NULL`/`DEFAULT` (table rebuild), `ADD UNIQUE`; `ADD` PK/FK/CHECK not enforced |
-| Numeric precision | 🟡 | exact decimal storage + compare/order + `sum`/`avg`; infix `+`/`-`/`*` still float |
-| Timestamps with time zone | ✅ | `timestamptz` stores a UTC instant; offsets honored, `AT TIME ZONE` works; output always UTC |
-| Backup / restore | ✅ | `\copy` and `pg_dump` (schema + data: types, constraints, sequences) |
-| Roles & permissions | 🟡 | `\du` roles with enforced passwords, table ownership, `GRANT`/`REVOKE` of table privileges, role membership with `INHERIT`, `CREATEROLE`/`ADMIN OPTION` policing, and row-level security (`CREATE POLICY`); no column-level privileges |
-| Server-side logic | 🟡 | `CREATE FUNCTION … LANGUAGE sql` executed (inlined), shown in `\df`/`\sf`, and dumped; PL/pgSQL/`PROCEDURE` accepted but not executed; triggers in SQLite syntax |
-| Sequences | ✅ | `CREATE`/`ALTER`/`DROP SEQUENCE`, `nextval`/`currval`/`setval`/`lastval`, `\ds`, and `DEFAULT nextval()` in DDL |
-| Enum types | 🟡 | `CREATE`/`ALTER`/`DROP TYPE … AS ENUM`, `\dT`; enum columns become `TEXT` + a `CHECK`; no enum ordering semantics |
-| `uuid` type | ✅ | stored as text; `gen_random_uuid()`/`uuid_generate_v4()` |
-| Query cancellation | ✅ | `CancelRequest` interrupts a running query |
-| Rich types | 🟡 | arrays, `hstore`, and range types supported (stored as JSON/text); geometric/network not yet; `interval` arithmetic partial |
-| Extensions | 🟡 | `CREATE EXTENSION` accepted as a no-op; common functions provided directly |
-| `LISTEN`/`NOTIFY` | ✅ | real in-memory pub/sub across sessions on the same server |
-| Replication / HA | ⬜ | |
-
-Everything marked ✅ is exercised end-to-end against real `psql` and pgx
-(`make test`). The 🟡/⬜ rows are the gap between "runs your app in dev" and
-"drop-in Postgres for production".
-
+Every ✅ is exercised end-to-end against real `psql` and pgx (`make test`). The
+remaining 🟡/⬜ items — the gap to a drop-in production Postgres — are listed in
+full under [Limitations](#limitations).
 
 ## Limitations
 
