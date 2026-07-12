@@ -10,6 +10,7 @@ import (
 )
 
 func TestSchemaLifecycle(t *testing.T) {
+	t.Setenv("OVERLITE_MULTITENANT_SCHEMA", "true") // this test asserts the file-per-schema layout
 	dir := t.TempDir()
 	main := filepath.Join(dir, "system.db")
 	vendasFile := filepath.Join(dir, "system.vendas.db")
@@ -81,6 +82,7 @@ func TestSchemaPersistsAcrossReopen(t *testing.T) {
 }
 
 func TestSchemaDiscoveryMultiple(t *testing.T) {
+	t.Setenv("OVERLITE_MULTITENANT_SCHEMA", "true") // file-per-schema discovery
 	dir := t.TempDir()
 	main := filepath.Join(dir, "hello.db")
 	ctx := context.Background()

@@ -19,12 +19,38 @@ import (
 // attaching them per connection, and generating the catalog views that span
 // every attached schema.
 
-// schemaRef presents one attached SQLite database as a Postgres schema.
+// schemaRef presents one Postgres schema to the catalog. In multi-file mode DB
+// is the attached SQLite database and Prefix is empty. In single-file mode DB is
+// always "main" and Prefix is the table-name prefix ("vendas.") that a schema's
+// tables carry; public has an empty prefix.
 type schemaRef struct {
 	PgName string // "public", "vendas"
 	DB     string // SQLite attached-db name: "main", "vendas"
 	NsOid  int    // pg_namespace.oid
 	Offset int64  // added to every oid so ids don't collide across schemas
+	Prefix string // single-file table-name prefix: "" (public) or "vendas."
+}
+
+// master returns the SQL table source the per-schema templates read as
+// @MASTER@. In multi-file mode it's the attached database's sqlite_master. In
+// single-file mode the public schema reads a view of main.sqlite_master that
+// excludes tables belonging to a registered schema (a "vendas." prefix), so
+// those don't leak into public; non-public schemas don't drive templates.
+func (r schemaRef) master() string {
+	if schemaFilesMode {
+		return r.DB + ".sqlite_master"
+	}
+	if r.Prefix == "" {
+		// public: bare-named tables, i.e. anything not owned by a registered
+		// schema (a "<schema>." prefix).
+		return `(SELECT rowid, type, name, tbl_name, sql FROM main.sqlite_master
+		  WHERE instr(name,'.')=0
+		     OR NOT EXISTS (SELECT 1 FROM _overlite_schemas s
+		                    WHERE s.name = substr(name,1,instr(name,'.')-1)))`
+	}
+	// a schema: exactly the tables carrying its "<name>." prefix.
+	return `(SELECT rowid, type, name, tbl_name, sql FROM main.sqlite_master
+	  WHERE name LIKE '` + escapeLike(r.Prefix) + `%' ESCAPE '\')`
 }
 
 // catalogRole is the role name shown as owner / returned by current_user etc.
@@ -123,18 +149,25 @@ func discoverSchemaFiles(mainPath string) map[string]string {
 	return out
 }
 
-// schemaRefs assigns stable oids/offsets to main (public) plus the given
-// attached schema names (sorted for determinism).
-func schemaRefs(attached []string) []schemaRef {
+// schemaRefs assigns stable oids/offsets to main (public) plus the given schema
+// names (sorted for determinism). In multi-file mode each schema is its own
+// attached database; in single-file mode all share "main" and carry a
+// "<name>." table-name prefix.
+func schemaRefs(schemas []string) []schemaRef {
 	refs := []schemaRef{{PgName: "public", DB: "main", NsOid: 2200, Offset: 0}}
-	sort.Strings(attached)
-	for i, name := range attached {
-		refs = append(refs, schemaRef{
+	sort.Strings(schemas)
+	for i, name := range schemas {
+		r := schemaRef{
 			PgName: name,
 			DB:     name,
 			NsOid:  3000000 + i + 1,
 			Offset: int64(i+1) * 1_000_000_000_000,
-		})
+		}
+		if !schemaFilesMode {
+			r.DB = "main"
+			r.Prefix = name + "."
+		}
+		refs = append(refs, r)
 	}
 	return refs
 }
@@ -146,16 +179,29 @@ func schemaRefs(attached []string) []schemaRef {
 // CREATE/DROP SCHEMA.
 func setupConnection(ctx context.Context, exec func(string) error, query func(string) ([]string, error), mainPath string) error {
 	var attached []string
-	if mainPath != "" && mainPath != ":memory:" {
-		for name, path := range discoverSchemaFiles(mainPath) {
-			// Attach if not already attached; ignore "already in use".
-			_ = exec(fmt.Sprintf("ATTACH DATABASE '%s' AS %q", path, name))
-			attached = append(attached, name)
+	if schemaFilesMode {
+		if mainPath != "" && mainPath != ":memory:" {
+			for name, path := range discoverSchemaFiles(mainPath) {
+				// Attach if not already attached; ignore "already in use".
+				_ = exec(fmt.Sprintf("ATTACH DATABASE '%s' AS %q", path, name))
+				attached = append(attached, name)
+			}
+		}
+		// The set of attached schemas is the source of truth.
+		if names, err := query("SELECT name FROM pragma_database_list WHERE name NOT IN ('main','temp')"); err == nil {
+			attached = names
 		}
 	}
-	// The set of attached schemas is the source of truth.
-	if names, err := query("SELECT name FROM pragma_database_list WHERE name NOT IN ('main','temp')"); err == nil {
-		attached = names
+	// The schema registry (single-file mode reads it for the schema list; the
+	// table exists in both modes so DDL is uniform).
+	if err := exec(schemasTableDDL); err != nil {
+		return err
+	}
+	if !schemaFilesMode {
+		if names, err := query("SELECT name FROM _overlite_schemas ORDER BY name"); err == nil {
+			attached = names
+			setSchemaCache(names) // the schema-qualifier rewrite reads this
+		}
 	}
 
 	// The internal roles table (pg_roles reads from it) must exist before the
@@ -290,6 +336,9 @@ func createSchema(ctx context.Context, ce connExecutor, mainPath, name string, i
 	if !validSchemaName(name) {
 		return fmt.Errorf("invalid schema name %q", name)
 	}
+	if !schemaFilesMode {
+		return createSchemaSingle(ctx, ce, mainPath, name, ifNotExists)
+	}
 	if mainPath == "" || mainPath == ":memory:" {
 		return fmt.Errorf("schemas require an on-disk database")
 	}
@@ -306,9 +355,30 @@ func createSchema(ctx context.Context, ce connExecutor, mainPath, name string, i
 	return rebuildCatalog(ctx, ce, mainPath)
 }
 
+// createSchemaSingle records a schema in _overlite_schemas (single-file mode).
+// It's an ordinary write, so it works inside a transaction and in :memory:.
+func createSchemaSingle(ctx context.Context, ce connExecutor, mainPath, name string, ifNotExists bool) error {
+	if _, err := ce.ExecContext(ctx, schemasTableDDL); err != nil {
+		return err
+	}
+	if schemaRegistered(ctx, ce, name) {
+		if ifNotExists {
+			return nil
+		}
+		return fmt.Errorf("schema %q already exists", name)
+	}
+	if _, err := ce.ExecContext(ctx, "INSERT INTO _overlite_schemas (name) VALUES (?)", name); err != nil {
+		return err
+	}
+	return rebuildCatalog(ctx, ce, mainPath)
+}
+
 func dropSchema(ctx context.Context, ce connExecutor, mainPath, name string, ifExists, cascade bool) error {
 	if strings.EqualFold(name, "public") {
 		return fmt.Errorf("cannot drop schema %q", name)
+	}
+	if !schemaFilesMode {
+		return dropSchemaSingle(ctx, ce, mainPath, name, ifExists, cascade)
 	}
 	if !schemaAttached(ctx, ce, name) {
 		if ifExists {
@@ -332,6 +402,68 @@ func dropSchema(ctx context.Context, ce connExecutor, mainPath, name string, ifE
 	_ = os.Remove(path + "-wal")
 	_ = os.Remove(path + "-shm")
 	return rebuildCatalog(ctx, ce, mainPath)
+}
+
+// dropSchemaSingle removes a schema and (with CASCADE) its prefixed tables in
+// single-file mode. Fully transactional.
+func dropSchemaSingle(ctx context.Context, ce connExecutor, mainPath, name string, ifExists, cascade bool) error {
+	if !schemaRegistered(ctx, ce, name) {
+		if ifExists {
+			return nil
+		}
+		return fmt.Errorf("schema %q does not exist", name)
+	}
+	tables, err := schemaTables(ctx, ce, name)
+	if err != nil {
+		return err
+	}
+	if len(tables) > 0 && !cascade {
+		return fmt.Errorf("schema %q is not empty (use CASCADE)", name)
+	}
+	for _, t := range tables {
+		if _, err := ce.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %q", t)); err != nil {
+			return err
+		}
+	}
+	if _, err := ce.ExecContext(ctx, "DELETE FROM _overlite_schemas WHERE name = ? COLLATE NOCASE", name); err != nil {
+		return err
+	}
+	return rebuildCatalog(ctx, ce, mainPath)
+}
+
+// schemaRegistered reports whether a schema is in the single-file registry.
+func schemaRegistered(ctx context.Context, ce connExecutor, name string) bool {
+	var found string
+	err := ce.QueryRowContext(ctx,
+		"SELECT name FROM _overlite_schemas WHERE name = ? COLLATE NOCASE", name).Scan(&found)
+	return err == nil
+}
+
+// schemaTables lists the SQLite table names ("vendas.pedidos") belonging to a
+// single-file schema.
+func schemaTables(ctx context.Context, ce connExecutor, name string) ([]string, error) {
+	rows, err := ce.QueryContext(ctx,
+		"SELECT name FROM main.sqlite_master WHERE type='table' AND name LIKE ? ESCAPE '\\'",
+		escapeLike(name)+".%")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var t string
+		if err := rows.Scan(&t); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// escapeLike escapes LIKE metacharacters in a literal (used with ESCAPE '\').
+func escapeLike(s string) string {
+	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return r.Replace(s)
 }
 
 func schemaAttached(ctx context.Context, ce connExecutor, name string) bool {
@@ -365,6 +497,11 @@ func rebuildCatalog(ctx context.Context, ce connExecutor, mainPath string) error
 	}
 	return setupConnection(ctx, exec, q, mainPath)
 }
+
+// SchemaDDLTransactional reports whether schema DDL can run inside a tx (yes in
+// single-file mode, where a schema is an ordinary row/table, not an ATTACH).
+func (s *SQLite) SchemaDDLTransactional() bool        { return !schemaFilesMode }
+func (ss *sqliteSession) SchemaDDLTransactional() bool { return !schemaFilesMode }
 
 // CreateSchema / DropSchema on the engine's own connection (tests, convenience).
 func (s *SQLite) CreateSchema(ctx context.Context, name string, ifNotExists bool) error {

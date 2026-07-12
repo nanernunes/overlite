@@ -184,9 +184,9 @@ func (s *session) trySchemaDDL(sql string) (tag string, handled bool, err error)
 	if !ok {
 		return "", false, nil
 	}
-	if s.tx != nil {
-		// ATTACH/DETACH (which back schema create/drop) can't run inside a
-		// SQLite transaction.
+	if s.tx != nil && !sm.SchemaDDLTransactional() {
+		// In multi-file mode ATTACH/DETACH (which back schema create/drop) can't
+		// run inside a SQLite transaction.
 		return "", true, fmt.Errorf("CREATE/DROP SCHEMA cannot run inside a transaction block")
 	}
 	rest := fields[2:]

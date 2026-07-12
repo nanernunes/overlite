@@ -88,4 +88,8 @@ type Tx interface {
 type SchemaManager interface {
 	CreateSchema(ctx context.Context, name string, ifNotExists bool) error
 	DropSchema(ctx context.Context, name string, ifExists, cascade bool) error
+	// SchemaDDLTransactional reports whether CREATE/DROP SCHEMA may run inside a
+	// transaction block (true when schemas are name-prefixed tables in one file;
+	// false when each schema is a separate attached file and ATTACH can't).
+	SchemaDDLTransactional() bool
 }
