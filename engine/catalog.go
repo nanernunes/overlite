@@ -313,6 +313,16 @@ var registerCatalog = sync.OnceFunc(func() {
 		}
 		return sqliteTypeOID(fmt.Sprint(args[0])), nil
 	})
+	// Declared type modifiers for information_schema.columns.
+	scalar("overlite_char_max_length", 1, func(a []driver.Value) (driver.Value, error) {
+		return typeCharMaxLength(argStr(a[0])), nil
+	})
+	scalar("overlite_numeric_precision", 1, func(a []driver.Value) (driver.Value, error) {
+		return typeNumericPrecision(argStr(a[0])), nil
+	})
+	scalar("overlite_numeric_scale", 1, func(a []driver.Value) (driver.Value, error) {
+		return typeNumericScale(argStr(a[0])), nil
+	})
 
 	// jsonb containment (@> / <@, rewritten to json_contains in the dialect); the
 	// same operator on a range checks range containment.
