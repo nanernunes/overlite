@@ -109,15 +109,15 @@ schemas: `public`, `sales`, `audit`.
 High level, at a glance — including what's still needed to be **Postgres-ready
 for a real production system**. ✅ done · 🟡 partial · ⬜ not yet.
 
-Across the full feature matrix — **153 items: ✅ 130 · 🟡 21 · ⬜ 2**
-(85% done, 99% at least partial):
+Across the full feature matrix — **153 items: ✅ 131 · 🟡 20 · ⬜ 2**
+(86% done, 99% at least partial):
 
 | Area | ✅ | 🟡 | ⬜ |
 |---|--:|--:|--:|
 | Wire protocol | 14 | 0 | 0 |
 | Authentication | 9 | 0 | 0 |
 | DML (queries) | 11 | 2 | 0 |
-| DDL (schema) | 26 | 8 | 0 |
+| DDL (schema) | 27 | 7 | 0 |
 | Data types | 11 | 4 | 0 |
 | Transactions | 7 | 1 | 1 |
 | Schemas (multi-file) | 6 | 1 | 0 |

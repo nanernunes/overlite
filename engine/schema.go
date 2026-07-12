@@ -185,6 +185,10 @@ func setupConnection(ctx context.Context, exec func(string) error, query func(st
 	if err := exec(compositeTypesTableDDL); err != nil {
 		return err
 	}
+	// COMMENT ON storage (pg_description reads it).
+	if err := exec(commentsTableDDL); err != nil {
+		return err
+	}
 	// The internal privilege tables (GRANT/REVOKE storage + table ownership),
 	// consulted by the protocol before running a statement.
 	if err := exec(grantsTableDDL); err != nil {

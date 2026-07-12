@@ -91,6 +91,8 @@ type prepared struct {
 	alterDDL string
 	// listenNotify holds a raw LISTEN/UNLISTEN/NOTIFY statement.
 	listenNotify string
+	// comment holds a raw COMMENT ON statement.
+	comment string
 }
 
 type portal struct {
@@ -348,6 +350,10 @@ func (s *session) handleParse(body []byte) error {
 		s.prepared[name] = &prepared{listenNotify: raw}
 		return s.c.send(msgParseComplete, nil)
 	}
+	if isComment(raw) {
+		s.prepared[name] = &prepared{comment: raw}
+		return s.c.send(msgParseComplete, nil)
+	}
 	if rs, ok := interceptUtility(raw); ok {
 		s.prepared[name] = &prepared{util: rs}
 		return s.c.send(msgParseComplete, nil)
@@ -433,7 +439,7 @@ func (s *session) handleDescribe(body []byte) error {
 		if prep == nil {
 			return s.protoError("26000", "unknown prepared statement "+quoteName(name))
 		}
-		if prep.util != nil || prep.txControl != "" || prep.seqDDL != "" || prep.typeDDL != "" || prep.setRole != "" || prep.grant != "" || prep.rlsDDL != "" || prep.alterDDL != "" || prep.listenNotify != "" {
+		if prep.util != nil || prep.txControl != "" || prep.seqDDL != "" || prep.typeDDL != "" || prep.setRole != "" || prep.grant != "" || prep.rlsDDL != "" || prep.alterDDL != "" || prep.listenNotify != "" || prep.comment != "" {
 			if err := s.c.sendParameterDescription(0); err != nil {
 				return err
 			}
@@ -451,7 +457,7 @@ func (s *session) handleDescribe(body []byte) error {
 			return s.protoError("34000", "unknown portal "+quoteName(name))
 		}
 		prep = pt.prep
-		if prep.util != nil || prep.txControl != "" || prep.seqDDL != "" || prep.typeDDL != "" || prep.setRole != "" || prep.grant != "" || prep.rlsDDL != "" || prep.alterDDL != "" || prep.listenNotify != "" {
+		if prep.util != nil || prep.txControl != "" || prep.seqDDL != "" || prep.typeDDL != "" || prep.setRole != "" || prep.grant != "" || prep.rlsDDL != "" || prep.alterDDL != "" || prep.listenNotify != "" || prep.comment != "" {
 			return s.sendUtilDescribe(prep.util)
 		}
 		args = pt.params
@@ -578,6 +584,14 @@ func (s *session) handleExecute(body []byte) error {
 
 	if pt.prep.listenNotify != "" {
 		tag, _ := s.tryListenNotify(pt.prep.listenNotify)
+		return s.c.sendCommandComplete(tag)
+	}
+
+	if pt.prep.comment != "" {
+		tag, _, err := s.tryComment(pt.prep.comment)
+		if err != nil {
+			return s.protoExecError(err)
+		}
 		return s.c.sendCommandComplete(tag)
 	}
 

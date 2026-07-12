@@ -44,8 +44,7 @@ func interceptUtility(sql string) (*core.ResultSet, bool) {
 	w := firstWordUpper(sql)
 	switch w {
 	case "SET", "RESET", "DISCARD", "DEALLOCATE",
-		"LOAD", "CHECKPOINT", "CLUSTER", "ANALYZE", "LOCK",
-		"COMMENT": // no catalog comments yet; accept so migrations/dumps run
+		"LOAD", "CHECKPOINT", "CLUSTER", "ANALYZE", "LOCK":
 		return &core.ResultSet{Command: w}, true
 	case "SHOW":
 		return showResult(sql), true

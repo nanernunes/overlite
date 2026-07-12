@@ -711,9 +711,20 @@ var staticCatalogViews = []string{
 	 UNION ALL SELECT 403, 'btree', 'bthandler',   'i'
 	 UNION ALL SELECT 405, 'hash',  'hashhandler', 'i'`,
 
+	// pg_description is populated from _overlite_comments: relation-level
+	// comments join to pg_class for the oid (objsubid 0); column comments join
+	// through pg_attribute for the attnum (objsubid = attnum).
 	`CREATE TEMP VIEW IF NOT EXISTS pg_description AS
-	 SELECT 0 AS objoid, 0 AS classoid, 0 AS objsubid, '' AS description
-	 WHERE 0`,
+	 SELECT c.oid AS objoid, 1259 AS classoid, 0 AS objsubid, cm.comment AS description
+	   FROM _overlite_comments cm
+	   JOIN pg_class c ON lower(c.relname) = lower(cm.objname)
+	  WHERE cm.objkind <> 'column' AND cm.comment IS NOT NULL
+	 UNION ALL
+	 SELECT a.attrelid AS objoid, 1259 AS classoid, a.attnum AS objsubid, cm.comment AS description
+	   FROM _overlite_comments cm
+	   JOIN pg_class c ON lower(c.relname) = lower(cm.objname)
+	   JOIN pg_attribute a ON a.attrelid = c.oid AND lower(a.attname) = lower(cm.subname)
+	  WHERE cm.objkind = 'column' AND cm.comment IS NOT NULL`,
 
 	`CREATE TEMP VIEW IF NOT EXISTS pg_inherits AS
 	 SELECT 0 AS inhrelid, 0 AS inhparent, 0 AS inhseqno, 0 AS inhdetachpending

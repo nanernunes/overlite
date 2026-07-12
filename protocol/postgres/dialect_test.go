@@ -211,6 +211,15 @@ func TestRewriteRegClassCasts(t *testing.T) {
 	assert.Equal(t,
 		"(SELECT relname FROM pg_class WHERE oid = conrelid)",
 		rewrite("conrelid::pg_catalog.regclass"))
+	// A quoted name literal is resolved the other way, name → oid, so it
+	// compares to oid columns (obj_description('t'::regclass, ...), \d lookups).
+	assert.Equal(t,
+		"(SELECT oid FROM pg_class WHERE relname = 'emp')",
+		rewrite("'emp'::regclass"))
+	// A schema qualifier is dropped from the name.
+	assert.Equal(t,
+		"(SELECT oid FROM pg_class WHERE relname = 'emp')",
+		rewrite("'public.emp'::regclass"))
 }
 
 func TestRewriteObjectDefs(t *testing.T) {

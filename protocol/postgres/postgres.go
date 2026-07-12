@@ -444,6 +444,16 @@ func (s *session) handleSimpleQuery(body []byte) error {
 		return s.c.sendCommandComplete(tag)
 	}
 
+	if tag, handled, err := s.tryComment(sql); handled {
+		if err != nil {
+			if s.tx != nil {
+				s.txFailed = true
+			}
+			return s.c.sendError("42000", err.Error())
+		}
+		return s.c.sendCommandComplete(tag)
+	}
+
 	if isSetRole(sql) {
 		if err := s.applySetRole(sql); err != nil {
 			return s.c.sendError("22023", err.Error())

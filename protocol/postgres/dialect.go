@@ -29,6 +29,7 @@ func rewrite(sql string) string {
 	sql = rewriteEscapeStrings(sql)
 	sql = rewriteNiladicFuncs(sql)
 	sql = rewriteInformationSchema(sql)
+	sql = rewriteObjDescription(sql) // obj_description/col_description -> pg_description lookup
 	sql = rewriteOperatorSyntax(sql)        // unwrap OPERATOR(=)/OPERATOR(~) before ANY/regex handling
 	sql = rewriteArrayToStringSubquery(sql) // before ARRAY(subquery) is unwrapped
 	sql = rewriteArraySubquery(sql)
@@ -53,6 +54,48 @@ func rewrite(sql string) string {
 	sql = rewriteTrimFrom(sql)
 	sql = rewriteMatchOperators(sql)
 	return sql
+}
+
+// rewriteObjDescription turns obj_description(oid,'cat') / col_description(oid,
+// attnum) / shobj_description(oid,'cat') into a lookup against the pg_description
+// view (populated from _overlite_comments). These are what psql's \d+ reads for
+// table and column comments.
+func rewriteObjDescription(sql string) string {
+	sql = rewriteDescCall(sql, "obj_description", false)
+	sql = rewriteDescCall(sql, "shobj_description", false)
+	sql = rewriteDescCall(sql, "col_description", true)
+	return sql
+}
+
+func rewriteDescCall(sql, name string, isCol bool) string {
+	for from := 0; ; {
+		low := strings.ToLower(sql)
+		i := indexWordCall(low, name, from)
+		if i < 0 {
+			return sql
+		}
+		open := i + len(name)
+		for open < len(sql) && sql[open] == ' ' {
+			open++
+		}
+		args, end, ok := readParenArgs(sql, open)
+		if !ok {
+			return sql
+		}
+		parts := splitTopLevel(args)
+		if len(parts) < 2 {
+			from = end
+			continue
+		}
+		objsub := "0"
+		if isCol {
+			objsub = strings.TrimSpace(parts[1])
+		}
+		repl := "(SELECT description FROM pg_description WHERE objoid = " +
+			strings.TrimSpace(parts[0]) + " AND objsubid = " + objsub + " LIMIT 1)"
+		sql = sql[:i] + repl + sql[end:]
+		from = i + len(repl)
+	}
 }
 
 // rewriteTrimFrom converts SQL-standard trim syntax
@@ -209,12 +252,21 @@ func castExpr(operand, typeName string) string {
 	// under the hood), so keep it numeric. On anything else it's for display,
 	// so resolve the oid to its catalog name.
 	regLookup := func(col, table string) string {
+		op := strings.TrimSpace(operand)
 		// A quoted numeric oid ('16384'::regclass) must become a bare integer so
 		// it compares equal to integer oid columns (SQLite won't equate 1 = '1').
-		if isNumericLiteral(operand) {
-			return strings.Trim(strings.TrimSpace(operand), "'")
+		if isNumericLiteral(op) {
+			return strings.Trim(op, "'")
 		}
-		return "(SELECT " + col + " FROM " + table + " WHERE oid = " + operand + ")"
+		// A quoted name ('emp'::regclass, 'public.emp'::regclass) is resolved
+		// name -> oid: regclass IS an oid, and callers compare it to oid columns
+		// (obj_description('t'::regclass, 'pg_class'), \d lookups, ...).
+		if len(op) >= 2 && op[0] == '\'' && op[len(op)-1] == '\'' {
+			return "(SELECT oid FROM " + table + " WHERE " + col + " = " + regClassName(op) + ")"
+		}
+		// An oid-valued expression (c.oid::regclass) is resolved oid -> name for
+		// display, as psql expects.
+		return "(SELECT " + col + " FROM " + table + " WHERE oid = " + op + ")"
 	}
 	switch strings.ToLower(strings.TrimSpace(typeName)) {
 	case "regclass":
@@ -230,6 +282,19 @@ func castExpr(operand, typeName string) string {
 	default:
 		return "CAST(" + operand + " AS " + typeName + ")"
 	}
+}
+
+// regClassName turns a quoted relation name literal ('public."My Table"') into
+// a SQL string of the bare identifier ('My Table'), dropping the surrounding
+// single quotes, any schema qualifier and identifier double quotes.
+func regClassName(lit string) string {
+	s := strings.Trim(strings.TrimSpace(lit), "'")
+	if !strings.Contains(s, `"`) {
+		if i := strings.LastIndexByte(s, '.'); i >= 0 {
+			s = s[i+1:]
+		}
+	}
+	return sqlStr(strings.Trim(s, `"`))
 }
 
 // isNumericLiteral reports whether s is an integer literal, optionally quoted
