@@ -167,6 +167,16 @@ var registerCatalog = sync.OnceFunc(func() {
 		}
 		return nil, nil
 	})
+	// AT TIME ZONE: convert a stored (UTC) instant to a wall clock in the zone.
+	scalar("overlite_at_time_zone", 2, func(args []driver.Value) (driver.Value, error) {
+		if len(args) != 2 || args[0] == nil || args[1] == nil {
+			return nil, nil
+		}
+		if w, ok := atTimeZone(fmt.Sprint(args[0]), fmt.Sprint(args[1])); ok {
+			return w, nil
+		}
+		return nil, nil
+	})
 	scalar("cardinality", 1, func(args []driver.Value) (driver.Value, error) {
 		if len(args) > 0 {
 			if n, ok := jsonArrayLen(args[0]); ok {

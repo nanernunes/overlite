@@ -6,7 +6,36 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	_ "time/tzdata" // embed the zone database so AT TIME ZONE works everywhere
 )
+
+// atTimeZone converts a stored (UTC) instant to the wall-clock time in the given
+// zone — the timestamptz -> timestamp direction of `ts AT TIME ZONE 'zone'`.
+func atTimeZone(ts, zone string) (string, bool) {
+	loc, err := time.LoadLocation(zone)
+	if err != nil {
+		return "", false
+	}
+	tm, ok := parseUTCStamp(ts)
+	if !ok {
+		return "", false
+	}
+	return tm.In(loc).Format("2006-01-02 15:04:05.999999"), true
+}
+
+// parseUTCStamp parses a bare (UTC) timestamp text in the forms overlite stores.
+func parseUTCStamp(s string) (time.Time, bool) {
+	s = strings.TrimSpace(strings.Replace(s, "T", " ", 1))
+	for _, layout := range []string{
+		"2006-01-02 15:04:05.999999999-07:00", "2006-01-02 15:04:05-07:00",
+		"2006-01-02 15:04:05.999999999", "2006-01-02 15:04:05", "2006-01-02",
+	} {
+		if tm, err := time.ParseInLocation(layout, s, time.UTC); err == nil {
+			return tm, true
+		}
+	}
+	return time.Time{}, false
+}
 
 // This file backs the Postgres date/time functions that don't map cleanly onto
 // a SQLite built-in: date_trunc, date_part, and to_char. now()/extract are

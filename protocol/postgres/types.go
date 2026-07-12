@@ -21,22 +21,23 @@ const (
 // these only need to be accurate enough for a client to scan into the right
 // Go type.
 const (
-	oidBool      = 16
-	oidBytea     = 17
-	oidInt8      = 20
-	oidInt2      = 21
-	oidInt4      = 23
-	oidText      = 25
-	oidJSON      = 114
-	oidFloat8    = 701
-	oidBpchar    = 1042
-	oidVarchar   = 1043
-	oidDate      = 1082
-	oidTime      = 1083
-	oidNumeric   = 1700
-	oidTimestamp = 1114
-	oidUUID      = 2950
-	oidJSONB     = 3802
+	oidBool        = 16
+	oidBytea       = 17
+	oidInt8        = 20
+	oidInt2        = 21
+	oidInt4        = 23
+	oidText        = 25
+	oidJSON        = 114
+	oidFloat8      = 701
+	oidBpchar      = 1042
+	oidVarchar     = 1043
+	oidDate        = 1082
+	oidTime        = 1083
+	oidNumeric     = 1700
+	oidTimestamp   = 1114
+	oidTimestamptz = 1184
+	oidUUID        = 2950
+	oidJSONB       = 3802
 )
 
 // strictDeclOID maps a declared type we can advertise faithfully (and encode in
@@ -69,6 +70,9 @@ func strictDeclOID(decl string) (uint32, bool) {
 func timeOID(decl string) uint32 {
 	d := strings.ToUpper(decl)
 	switch {
+	case strings.Contains(d, "TIMESTAMPTZ"),
+		strings.Contains(d, "TIMESTAMP") && strings.Contains(d, "WITH TIME ZONE"):
+		return oidTimestamptz
 	case strings.Contains(d, "TIMESTAMP"), strings.Contains(d, "DATETIME"):
 		return oidTimestamp
 	case strings.Contains(d, "DATE"):
@@ -116,6 +120,11 @@ func oidForColumn(col core.Column, rows [][]core.Value, idx int) uint32 {
 	// Array columns carry their element type in the declared type (`text[]`).
 	if isArrayDecl(col.DeclType) {
 		return arrayOIDForDecl(col.DeclType)
+	}
+	// timestamptz is stored as text, so sampling would see a string; trust the
+	// declared type instead.
+	if isTimestamptzDecl(col.DeclType) {
+		return oidTimestamptz
 	}
 	// A faithfully-mappable declared type wins over value sampling (which would
 	// e.g. see a boolean's 0/1 as int, or a json string as text).
@@ -210,6 +219,13 @@ func encodeText(oid uint32, v core.Value) []byte {
 	if isArrayOID(oid) {
 		return jsonArrayToPGText(v)
 	}
+	// timestamptz is stored as bare UTC text; advertise the +00 offset so clients
+	// read it as an absolute instant.
+	if oid == oidTimestamptz {
+		if s, ok := v.(string); ok {
+			return []byte(withUTCOffset(s))
+		}
+	}
 	// Boolean columns may arrive as 0/1 integers or a stored 't'/'true' string;
 	// normalize to the Postgres 't'/'f' text form.
 	if oid == oidBool {
@@ -237,6 +253,8 @@ func encodeText(oid uint32, v core.Value) []byte {
 			return []byte(val.Format("2006-01-02"))
 		case oidTime:
 			return []byte(val.Format("15:04:05.999999"))
+		case oidTimestamptz:
+			return []byte(val.UTC().Format("2006-01-02 15:04:05.999999-07"))
 		default:
 			return []byte(val.Format("2006-01-02 15:04:05.999999"))
 		}

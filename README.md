@@ -109,7 +109,7 @@ schemas: `public`, `sales`, `audit`.
 High level, at a glance — including what's still needed to be **Postgres-ready
 for a real production system**. ✅ done · 🟡 partial · ⬜ not yet.
 
-Across the full feature matrix — **150 items: ✅ 125 · 🟡 17 · ⬜ 8**
+Across the full feature matrix — **151 items: ✅ 126 · 🟡 17 · ⬜ 8**
 (83% done, 95% at least partial):
 
 | Area | ✅ | 🟡 | ⬜ |
@@ -118,7 +118,7 @@ Across the full feature matrix — **150 items: ✅ 125 · 🟡 17 · ⬜ 8**
 | Authentication | 9 | 0 | 0 |
 | DML (queries) | 11 | 1 | 1 |
 | DDL (schema) | 24 | 6 | 3 |
-| Data types | 10 | 2 | 1 |
+| Data types | 11 | 2 | 1 |
 | Transactions | 7 | 1 | 1 |
 | Schemas (multi-file) | 6 | 1 | 0 |
 | Catalog / introspection | 20 | 2 | 1 |
@@ -140,7 +140,7 @@ Across the full feature matrix — **150 items: ✅ 125 · 🟡 17 · ⬜ 8**
 | Concurrency | ✅ | dedicated connection per client; reads run in parallel, writes serialize (SQLite single-writer) |
 | Migrations (`ALTER TABLE`) | 🟡 | add/drop/rename column; no `ALTER COLUMN TYPE` / `ADD CONSTRAINT` |
 | Numeric precision | 🟡 | SQLite affinity; not exact fixed-point (money) |
-| Timestamps with time zone | 🟡 | stored as text; no real `timestamptz` / tz math |
+| Timestamps with time zone | ✅ | `timestamptz` stores a UTC instant; offsets honored, `AT TIME ZONE` works; output always UTC |
 | Backup / restore | ✅ | `\copy` and `pg_dump` (schema + data: types, constraints, sequences) |
 | Roles & permissions | 🟡 | `\du` roles with enforced passwords, table ownership, `GRANT`/`REVOKE` of table privileges, role membership with `INHERIT`, `CREATEROLE`/`ADMIN OPTION` policing, and row-level security (`CREATE POLICY`); no column-level privileges |
 | Server-side logic | ⬜ | PL/pgSQL functions & procedures (triggers only in SQLite syntax) |
@@ -172,7 +172,10 @@ These would require emulating features SQLite fundamentally lacks:
   `unnest`.)
 - **Exact `numeric`/`decimal`** precision & scale, and **`money`** — SQLite uses
   type affinity, not fixed-point.
-- **`timestamptz`** / real time-zone math — timestamps are stored as text.
+- **Session `TimeZone` display** — `timestamptz` works (stores a UTC instant,
+  honors input offsets, `AT TIME ZONE` converts via the Go zone database), but
+  output is always rendered in UTC (`+00`); `SET timezone` doesn't change the
+  display zone.
 - **`ALTER TABLE ALTER COLUMN TYPE`** and **`ADD CONSTRAINT`** — SQLite can't
   change a column's type or add a constraint to an existing table. (A `pg_dump`
   restore still loads data/tables/sequences; those constraint statements are
