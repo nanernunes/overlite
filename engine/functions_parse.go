@@ -30,11 +30,12 @@ func parseCreateFunction(sql string) (sqlFunc, bool) {
 	if op < 0 {
 		return fn, false
 	}
-	params, _, ok := balancedArgs(sql, op)
+	params, afterParams, ok := balancedArgs(sql, op)
 	if !ok {
 		return fn, false
 	}
 	fn.params, fn.arity = parseParams(params)
+	fn.args = strings.TrimSpace(collapseSpaces(params))
 
 	// body: dollar-quoted or single-quoted.
 	body, bs, be, ok := findDollarBody(sql)
@@ -49,7 +50,59 @@ func parseCreateFunction(sql string) (sqlFunc, bool) {
 	// language: search outside the body region (default order puts it after).
 	region := sql[:bs] + " " + sql[be:]
 	fn.lang = wordAfterKeyword(region, "language")
+	// return type: between RETURNS and the AS/LANGUAGE that follows (before body).
+	fn.rettype = extractReturns(sql[afterParams:bs])
 	return fn, true
+}
+
+// extractReturns pulls the return type out of the "… RETURNS <type> [LANGUAGE …]
+// [AS]" region between the parameter list and the body.
+func extractReturns(region string) string {
+	low := strings.ToLower(region)
+	i := indexWord(low, "returns")
+	if i < 0 {
+		return ""
+	}
+	rest := region[i+len("returns"):]
+	// Cut at a trailing LANGUAGE or AS keyword (whichever comes first).
+	end := len(rest)
+	lrest := strings.ToLower(rest)
+	for _, kw := range []string{"language", "as"} {
+		if k := indexWord(lrest, kw); k >= 0 && k < end {
+			end = k
+		}
+	}
+	return strings.TrimSpace(collapseSpaces(rest[:end]))
+}
+
+// collapseSpaces turns runs of whitespace into single spaces.
+func collapseSpaces(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
+// identityArgs drops parameter names from an argument list, leaving the types
+// (Postgres' "identity arguments" used in DROP/COMMENT): "price numeric, rate
+// numeric" -> "numeric, numeric".
+func identityArgs(args string) string {
+	if strings.TrimSpace(args) == "" {
+		return ""
+	}
+	parts := splitTopLevelArgs(args)
+	out := make([]string, len(parts))
+	for i, part := range parts {
+		toks := strings.Fields(strings.TrimSpace(part))
+		if len(toks) > 0 {
+			switch strings.ToLower(toks[0]) {
+			case "in", "out", "inout", "variadic":
+				toks = toks[1:]
+			}
+		}
+		if len(toks) >= 2 { // "<name> <type…>" → drop the name
+			toks = toks[1:]
+		}
+		out[i] = strings.Join(toks, " ")
+	}
+	return strings.Join(out, ", ")
 }
 
 // parseDropFunction extracts the name and (if given) arity from DROP FUNCTION.

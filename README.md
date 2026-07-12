@@ -117,8 +117,8 @@ There schema DDL can't run in a transaction (`ATTACH` can't).
 High level, at a glance — including what's still needed to be **Postgres-ready
 for a real production system**. ✅ done · 🟡 partial · ⬜ not yet.
 
-Across the full feature matrix — **157 items: ✅ 140 · 🟡 16 · ⬜ 1**
-(89% done, 99% at least partial):
+Across the full feature matrix — **157 items: ✅ 141 · 🟡 15 · ⬜ 1**
+(90% done, 99% at least partial):
 
 | Area | ✅ | 🟡 | ⬜ |
 |---|--:|--:|--:|
@@ -129,7 +129,7 @@ Across the full feature matrix — **157 items: ✅ 140 · 🟡 16 · ⬜ 1**
 | Data types | 11 | 4 | 0 |
 | Transactions | 8 | 1 | 0 |
 | Schemas | 10 | 0 | 0 |
-| Catalog / introspection | 20 | 2 | 1 |
+| Catalog / introspection | 21 | 1 | 1 |
 | Functions & dialect | 21 | 1 | 0 |
 | Tooling (psql/pg_dump/GUIs) | 6 | 1 | 0 |
 
@@ -151,7 +151,7 @@ Across the full feature matrix — **157 items: ✅ 140 · 🟡 16 · ⬜ 1**
 | Timestamps with time zone | ✅ | `timestamptz` stores a UTC instant; offsets honored, `AT TIME ZONE` works; output always UTC |
 | Backup / restore | ✅ | `\copy` and `pg_dump` (schema + data: types, constraints, sequences) |
 | Roles & permissions | 🟡 | `\du` roles with enforced passwords, table ownership, `GRANT`/`REVOKE` of table privileges, role membership with `INHERIT`, `CREATEROLE`/`ADMIN OPTION` policing, and row-level security (`CREATE POLICY`); no column-level privileges |
-| Server-side logic | 🟡 | `CREATE FUNCTION … LANGUAGE sql` executed (inlined at call sites); PL/pgSQL/`PROCEDURE` accepted but not executed; triggers in SQLite syntax |
+| Server-side logic | 🟡 | `CREATE FUNCTION … LANGUAGE sql` executed (inlined), shown in `\df`/`\sf`, and dumped; PL/pgSQL/`PROCEDURE` accepted but not executed; triggers in SQLite syntax |
 | Sequences | ✅ | `CREATE`/`ALTER`/`DROP SEQUENCE`, `nextval`/`currval`/`setval`/`lastval`, `\ds`, and `DEFAULT nextval()` in DDL |
 | Enum types | 🟡 | `CREATE`/`ALTER`/`DROP TYPE … AS ENUM`, `\dT`; enum columns become `TEXT` + a `CHECK`; no enum ordering semantics |
 | `uuid` type | ✅ | stored as text; `gen_random_uuid()`/`uuid_generate_v4()` |
@@ -194,12 +194,11 @@ of gaps — 🟡 **partial** (works, with caveats) · ⬜ **not implemented**.
 
 - 🟡 **PL/pgSQL functions / procedures / aggregates** — accepted so migrations
   proceed, but the body isn't executed (no procedural engine). `CREATE FUNCTION …
-  LANGUAGE sql` **is** executed.
+  LANGUAGE sql` **is** fully supported (executed, shown in `\df`/`\sf`, dumped).
 - 🟡 **`CREATE TRIGGER`** — accepted; Postgres trigger functions (PL/pgSQL) aren't
   executed.
 - 🟡 **`CREATE`/`DROP EXTENSION`** — a no-op; the common functions (e.g.
   `gen_random_uuid`) are provided directly.
-- 🟡 **`pg_get_expr` / `pg_get_functiondef`** — stubbed (return empty).
 
 ### DDL & constraints
 

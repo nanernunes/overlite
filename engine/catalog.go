@@ -169,7 +169,6 @@ var registerCatalog = sync.OnceFunc(func() {
 	for _, name := range []string{
 		"pg_get_indexdef", "pg_get_constraintdef", "pg_get_viewdef",
 		"pg_get_partkeydef", "pg_get_ruledef",
-		"pg_get_function_identity_arguments", "pg_get_functiondef",
 	} {
 		scalar(name, -1, func([]driver.Value) (driver.Value, error) { return "", nil })
 	}
@@ -192,9 +191,24 @@ var registerCatalog = sync.OnceFunc(func() {
 		scalar(name, -1, func([]driver.Value) (driver.Value, error) { return nil, nil })
 	}
 	scalar("pg_encoding_to_char", 1, func([]driver.Value) (driver.Value, error) { return "UTF8", nil })
-	for _, name := range []string{"pg_get_function_result", "pg_get_function_arguments", "array_to_string"} {
-		scalar(name, -1, func([]driver.Value) (driver.Value, error) { return "", nil })
+	scalar("array_to_string", -1, func([]driver.Value) (driver.Value, error) { return "", nil })
+	// Function-definition renderers for user LANGUAGE sql functions (\sf, \df,
+	// pg_dump reconstruct from these). Unknown oids (catalog stubs) return "".
+	fnField := func(pick func(sqlFunc) string) func([]driver.Value) (driver.Value, error) {
+		return func(a []driver.Value) (driver.Value, error) {
+			if len(a) == 0 || a[0] == nil {
+				return "", nil
+			}
+			if f, ok := funcByOidLookup(asInt64(a[0])); ok {
+				return pick(f), nil
+			}
+			return "", nil
+		}
 	}
+	scalar("pg_get_functiondef", -1, fnField(func(f sqlFunc) string { return f.src }))
+	scalar("pg_get_function_arguments", -1, fnField(func(f sqlFunc) string { return f.args }))
+	scalar("pg_get_function_result", -1, fnField(func(f sqlFunc) string { return f.rettype }))
+	scalar("pg_get_function_identity_arguments", -1, fnField(func(f sqlFunc) string { return identityArgs(f.args) }))
 	for _, name := range []string{
 		"array_ndims", "array_remove", "array_cat", "array_append",
 		"array_prepend", "array_position", "array_positions", "array_replace",
@@ -907,8 +921,11 @@ var staticCatalogViews = []string{
 	 SELECT 0 AS oid, 0 AS castsource, 0 AS casttarget, 0 AS castfunc,
 	        'e' AS castcontext, 'f' AS castmethod WHERE 0`,
 	`CREATE TEMP VIEW IF NOT EXISTS pg_language AS
-	 SELECT 0 AS oid, '' AS lanname, 10 AS lanowner, 0 AS lanispl, 0 AS lanpltrusted,
-	        0 AS lanplcallfoid, 0 AS laninline, 0 AS lanvalidator, NULL AS lanacl WHERE 0`,
+	 SELECT 12 AS oid, 'internal' AS lanname, 10 AS lanowner, 0 AS lanispl, 0 AS lanpltrusted,
+	        0 AS lanplcallfoid, 0 AS laninline, 0 AS lanvalidator, NULL AS lanacl
+	 UNION ALL SELECT 13,'c',10,0,0,0,0,0,NULL
+	 UNION ALL SELECT 14,'sql',10,0,1,0,0,0,NULL
+	 UNION ALL SELECT 13545,'plpgsql',10,1,1,0,0,0,NULL`,
 
 	`CREATE TEMP VIEW IF NOT EXISTS pg_settings AS
 	 SELECT '' AS name, '' AS setting, '' AS unit, '' AS category, '' AS short_desc,
@@ -953,11 +970,19 @@ func pgProcView() string {
 	for i, name := range catalogFunctionNames {
 		parts[i] = fmt.Sprintf(row, 100000+i, sqlQuote(name))
 	}
-	// User-defined LANGUAGE sql functions are executed by inlining but are NOT
-	// added to pg_proc here: pg_dump enumerates dumpable functions from pg_proc
-	// and its per-function detail query needs catalog support we don't have yet,
-	// so listing them would break `pg_dump`. \df of user functions is deferred.
-	return "CREATE TEMP VIEW pg_proc AS " + strings.Join(parts, " UNION ALL ")
+	// User-defined LANGUAGE sql functions, read live from the registry (public
+	// namespace 2200, `sql` language 14). \df/\sf and pg_dump reconstruct the
+	// signature from pg_get_function_arguments/result and the body from prosrc.
+	userRow := `SELECT CAST(rowid + 500000 AS INTEGER) AS oid, name AS proname, 2200 AS pronamespace, 10 AS proowner,` +
+		` 14 AS prolang, 'f' AS prokind, 25 AS prorettype, '' AS proargtypes,` +
+		` arity AS pronargs, 0 AS proretset, NULL AS proacl, body AS prosrc, NULL AS probin,` +
+		` 'v' AS provolatile, 0 AS proisstrict, NULL AS proargmodes,` +
+		` CASE WHEN params='' THEN NULL ELSE '{'||replace(params,char(31),',')||'}' END AS proargnames,` +
+		` NULL AS proallargtypes, 0 AS prosecdef, NULL AS proconfig, 100 AS procost,` +
+		` 0 AS prorows, 0 AS provariadic, 0 AS prosupport, 0 AS proleakproof,` +
+		` 's' AS proparallel, NULL AS proargdefaults, 0 AS pronargdefaults, NULL AS prosqlbody,` +
+		` NULL AS protrftypes, 1255 AS tableoid FROM _overlite_functions WHERE lang='sql'`
+	return "CREATE TEMP VIEW pg_proc AS " + strings.Join(parts, " UNION ALL ") + " UNION ALL " + userRow
 }
 
 // infoRoutinesView builds information_schema.routines from the same list.

@@ -244,6 +244,9 @@ func setupConnection(ctx context.Context, exec func(string) error, query func(st
 	if err := exec(functionsTableDDL); err != nil {
 		return err
 	}
+	for _, ddl := range functionsAddColsDDL {
+		_ = exec(ddl) // migrate older tables; errors harmlessly if present
+	}
 	// The internal privilege tables (GRANT/REVOKE storage + table ownership),
 	// consulted by the protocol before running a statement.
 	if err := exec(grantsTableDDL); err != nil {
@@ -279,7 +282,8 @@ func setupConnection(ctx context.Context, exec func(string) error, query func(st
 		refreshEnumNames(names)
 	}
 	// Refresh the LANGUAGE sql function cache (columns joined by char(30)).
-	if rows, err := query("SELECT name || char(30) || arity || char(30) || params || char(30) || body || char(30) || lang" +
+	if rows, err := query("SELECT rowid || char(30) || name || char(30) || arity || char(30) || params" +
+		" || char(30) || body || char(30) || lang || char(30) || args || char(30) || rettype || char(30) || src" +
 		" FROM _overlite_functions"); err == nil {
 		refreshFunctionsFromRows(rows)
 	}

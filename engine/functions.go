@@ -20,27 +20,54 @@ import (
 // per connection.
 
 const functionsTableDDL = `CREATE TABLE IF NOT EXISTS _overlite_functions (
-  name   TEXT COLLATE NOCASE,
-  arity  INTEGER,
-  params TEXT,
-  body   TEXT,
-  lang   TEXT,
+  name    TEXT COLLATE NOCASE,
+  arity   INTEGER,
+  params  TEXT,
+  body    TEXT,
+  lang    TEXT,
+  args    TEXT DEFAULT '',
+  rettype TEXT DEFAULT '',
+  src     TEXT DEFAULT '',
   PRIMARY KEY (name, arity)
 )`
 
-type sqlFunc struct {
-	name   string
-	arity  int
-	params []string // parameter names ("" for an unnamed slot), len == arity
-	body   string   // the SQL body, e.g. "SELECT price * (1 + rate)"
-	lang   string
+// functionsAddColsDDL migrate older tables (each errors harmlessly if present).
+var functionsAddColsDDL = []string{
+	`ALTER TABLE _overlite_functions ADD COLUMN args TEXT DEFAULT ''`,
+	`ALTER TABLE _overlite_functions ADD COLUMN rettype TEXT DEFAULT ''`,
+	`ALTER TABLE _overlite_functions ADD COLUMN src TEXT DEFAULT ''`,
 }
+
+type sqlFunc struct {
+	oid     int64 // rowid + funcOIDBase; how pg_proc/pg_get_functiondef key it
+	name    string
+	arity   int
+	params  []string // parameter names ("" for an unnamed slot), len == arity
+	body    string   // the SQL body, e.g. "SELECT price * (1 + rate)"
+	lang    string
+	args    string // raw param list, e.g. "price numeric, rate numeric"
+	rettype string // e.g. "numeric" or "TABLE(id int, sal int)"
+	src     string // the original CREATE FUNCTION statement
+}
+
+// funcOIDBase offsets a function's rowid into its catalog oid. It stays below
+// pg_dump's built-in cutoff considerations while clearing the pg_catalog range.
+const funcOIDBase = 500000
 
 var (
 	funcCacheMu sync.RWMutex
 	funcCache   = map[string]sqlFunc{} // key: lower(name)+"/"+arity
 	funcNames   = map[string]bool{}    // lower(name) present, for a quick scan guard
+	funcByOid   = map[int64]sqlFunc{}  // oid -> def, for pg_get_function*
 )
+
+// funcByOidLookup returns the definition for a user-function oid.
+func funcByOidLookup(oid int64) (sqlFunc, bool) {
+	funcCacheMu.RLock()
+	defer funcCacheMu.RUnlock()
+	f, ok := funcByOid[oid]
+	return f, ok
+}
 
 func funcKey(name string, arity int) string {
 	return strings.ToLower(name) + "/" + strconv.Itoa(arity)
@@ -49,12 +76,16 @@ func funcKey(name string, arity int) string {
 func setFunctionCache(fns []sqlFunc) {
 	m := make(map[string]sqlFunc, len(fns))
 	names := make(map[string]bool, len(fns))
+	byOid := make(map[int64]sqlFunc, len(fns))
 	for _, f := range fns {
 		m[funcKey(f.name, f.arity)] = f
 		names[strings.ToLower(f.name)] = true
+		if f.oid != 0 {
+			byOid[f.oid] = f
+		}
 	}
 	funcCacheMu.Lock()
-	funcCache, funcNames = m, names
+	funcCache, funcNames, funcByOid = m, names, byOid
 	funcCacheMu.Unlock()
 }
 
@@ -79,7 +110,8 @@ func haveFunctions() bool {
 
 // reloadFunctions rebuilds the cache from _overlite_functions.
 func reloadFunctions(ctx context.Context, q querier) {
-	rows, err := q.QueryContext(ctx, "SELECT name, arity, params, body, lang FROM _overlite_functions")
+	rows, err := q.QueryContext(ctx,
+		"SELECT rowid, name, arity, params, body, lang, args, rettype, src FROM _overlite_functions")
 	if err != nil {
 		return
 	}
@@ -87,10 +119,12 @@ func reloadFunctions(ctx context.Context, q querier) {
 	var fns []sqlFunc
 	for rows.Next() {
 		var f sqlFunc
+		var rowid int64
 		var params string
-		if err := rows.Scan(&f.name, &f.arity, &params, &f.body, &f.lang); err != nil {
+		if err := rows.Scan(&rowid, &f.name, &f.arity, &params, &f.body, &f.lang, &f.args, &f.rettype, &f.src); err != nil {
 			return
 		}
+		f.oid = rowid + funcOIDBase
 		if params != "" {
 			f.params = strings.Split(params, "\x1f")
 		} else {
@@ -111,12 +145,15 @@ func refreshFunctionsFromRows(rows []string) {
 	var fns []sqlFunc
 	for _, r := range rows {
 		c := strings.Split(r, "\x1e")
-		if len(c) < 5 || !strings.EqualFold(c[4], "sql") {
+		if len(c) < 9 || !strings.EqualFold(c[5], "sql") {
 			continue
 		}
-		f := sqlFunc{name: c[0], arity: atoiSafe(c[1]), body: c[3], lang: c[4]}
-		if c[2] != "" {
-			f.params = strings.Split(c[2], "\x1f")
+		f := sqlFunc{
+			oid: int64(atoiSafe(c[0])) + funcOIDBase, name: c[1], arity: atoiSafe(c[2]),
+			body: c[4], lang: c[5], args: c[6], rettype: c[7], src: c[8],
+		}
+		if c[3] != "" {
+			f.params = strings.Split(c[3], "\x1f")
 		} else {
 			f.params = make([]string, f.arity)
 		}
@@ -135,8 +172,9 @@ func tryFunctionDDL(ctx context.Context, q querier, sql string) (*core.ResultSet
 		if ok && strings.EqualFold(fn.lang, "sql") && fn.name != "" {
 			params := strings.Join(fn.params, "\x1f")
 			_, err := q.ExecContext(ctx,
-				"INSERT OR REPLACE INTO _overlite_functions (name, arity, params, body, lang) VALUES (?,?,?,?,?)",
-				fn.name, fn.arity, params, fn.body, "sql")
+				"INSERT OR REPLACE INTO _overlite_functions (name, arity, params, body, lang, args, rettype, src)"+
+					" VALUES (?,?,?,?,?,?,?,?)",
+				fn.name, fn.arity, params, fn.body, "sql", fn.args, fn.rettype, strings.TrimSpace(sql))
 			if err == nil {
 				reloadFunctions(ctx, q)
 			}
