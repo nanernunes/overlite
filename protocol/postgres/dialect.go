@@ -22,6 +22,7 @@ func rewrite(sql string) string {
 	sql = rewriteAtTimeZone(sql)         // expr AT TIME ZONE 'zone'
 	sql = rewriteInterval(sql)
 	sql = rewriteExtract(sql)
+	sql = rewriteHstoreCast(sql)
 	sql = rewriteJSONFuncs(sql)
 	sql = rewriteJSONPath(sql)
 	sql = rewriteEscapeStrings(sql)

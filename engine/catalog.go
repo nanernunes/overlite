@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql/driver"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math/big"
@@ -348,6 +349,46 @@ var registerCatalog = sync.OnceFunc(func() {
 		}
 		return boolFn(jsonbExistsAll(fmt.Sprint(a[0]), fmt.Sprint(a[1]))), nil
 	})
+
+	// hstore (stored as a JSON object; see engine/hstore.go).
+	scalar("hstore_in", 1, func(a []driver.Value) (driver.Value, error) {
+		if len(a) == 0 || a[0] == nil {
+			return nil, nil
+		}
+		return hstoreIn(fmt.Sprint(a[0])), nil
+	})
+	scalar("hstore", 2, func(a []driver.Value) (driver.Value, error) {
+		if len(a) < 2 || a[0] == nil {
+			return nil, nil
+		}
+		var v any
+		if a[1] != nil {
+			v = fmt.Sprint(a[1])
+		}
+		b, _ := json.Marshal(map[string]any{fmt.Sprint(a[0]): v})
+		return string(b), nil
+	})
+	scalar("akeys", 1, func(a []driver.Value) (driver.Value, error) {
+		if len(a) == 0 || a[0] == nil {
+			return nil, nil
+		}
+		return hstoreKeys(fmt.Sprint(a[0])), nil
+	})
+	scalar("avals", 1, func(a []driver.Value) (driver.Value, error) {
+		if len(a) == 0 || a[0] == nil {
+			return nil, nil
+		}
+		return hstoreVals(fmt.Sprint(a[0])), nil
+	})
+	// hstore is already JSON, so hstore_to_json[b] is the identity.
+	for _, name := range []string{"hstore_to_json", "hstore_to_jsonb"} {
+		scalar(name, 1, func(a []driver.Value) (driver.Value, error) {
+			if len(a) == 0 {
+				return nil, nil
+			}
+			return a[0], nil
+		})
+	}
 
 	// Date/time functions (now()/extract are handled in the dialect layer).
 	scalar("date_trunc", 2, dateTruncFn)

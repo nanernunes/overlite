@@ -109,7 +109,7 @@ schemas: `public`, `sales`, `audit`.
 High level, at a glance — including what's still needed to be **Postgres-ready
 for a real production system**. ✅ done · 🟡 partial · ⬜ not yet.
 
-Across the full feature matrix — **152 items: ✅ 128 · 🟡 18 · ⬜ 6**
+Across the full feature matrix — **153 items: ✅ 128 · 🟡 19 · ⬜ 6**
 (84% done, 96% at least partial):
 
 | Area | ✅ | 🟡 | ⬜ |
@@ -118,7 +118,7 @@ Across the full feature matrix — **152 items: ✅ 128 · 🟡 18 · ⬜ 6**
 | Authentication | 9 | 0 | 0 |
 | DML (queries) | 11 | 1 | 1 |
 | DDL (schema) | 25 | 7 | 2 |
-| Data types | 11 | 2 | 1 |
+| Data types | 11 | 3 | 1 |
 | Transactions | 7 | 1 | 1 |
 | Schemas (multi-file) | 6 | 1 | 0 |
 | Catalog / introspection | 20 | 2 | 1 |
@@ -148,7 +148,7 @@ Across the full feature matrix — **152 items: ✅ 128 · 🟡 18 · ⬜ 6**
 | Enum types | 🟡 | `CREATE`/`ALTER`/`DROP TYPE … AS ENUM`, `\dT`; enum columns become `TEXT` + a `CHECK`; no enum ordering semantics |
 | `uuid` type | ✅ | stored as text; `gen_random_uuid()`/`uuid_generate_v4()` |
 | Query cancellation | ✅ | `CancelRequest` interrupts a running query |
-| Rich types | 🟡 | arrays supported (stored as JSON); `hstore`/ranges not yet; `interval` arithmetic partial |
+| Rich types | 🟡 | arrays + `hstore` supported (stored as JSON); ranges/geometric not yet; `interval` arithmetic partial |
 | Extensions | 🟡 | `CREATE EXTENSION` accepted as a no-op; common functions provided directly |
 | `LISTEN`/`NOTIFY` | 🟡 | accepted as no-ops (no delivery) |
 | Replication / HA | ⬜ | |
@@ -166,10 +166,8 @@ faithfully or aren't modeled yet. The full, current breakdown:
 
 These would require emulating features SQLite fundamentally lacks:
 
-- **`hstore`**, geometric / network / range types — not modeled yet. (**Arrays**
-  are supported, though — stored as JSON, they round-trip as real Postgres
-  arrays with `ARRAY[…]`, `{…}` output, subscripts, `array_length`, `= ANY`, and
-  `unnest`.)
+- **Geometric / network / range types** — not modeled yet. (**Arrays** and
+  **`hstore`** *are* supported, stored as JSON — see Partial.)
 - **Infix `numeric` arithmetic** — SQLite's `+`/`-`/`*`/`/` operators are float,
   and can't be overridden. (`numeric` *storage* is exact, though — see Partial —
   and `dec_add`/`dec_mul`/… give exact results explicitly.) `money` and enforced
@@ -248,6 +246,11 @@ These run so migrations, ORMs, and dumps proceed, but have no real effect:
   still go through SQLite's float operators (call `dec_add`/`dec_sub`/`dec_mul`/
   `dec_div`/`dec_round` for exact results), and `numeric(p,s)` scale isn't
   enforced on write.
+- **`hstore`** — a key/value column stored as a JSON object (plain-SQLite
+  readable). `'k=>v'::hstore` on input, hstore text (`"k"=>"v"`) on output, and
+  `->>` (value), `?` (key existence), `akeys`/`avals`, `hstore(k,v)`. Caveats:
+  `->` returns the JSON-quoted scalar (use `->>` for text), and a bare insert
+  needs the `::hstore` cast to be parsed.
 - **Enum columns** — enforced via `TEXT` + `CHECK` and `\dT+` lists the
   elements, but there's no enum ordering/comparison.
 - **Composite types** — `CREATE TYPE … AS (…)` shows in `pg_type`/`\dT`, but the

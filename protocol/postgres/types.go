@@ -38,6 +38,9 @@ const (
 	oidTimestamptz = 1184
 	oidUUID        = 2950
 	oidJSONB       = 3802
+	// hstore is an extension type with a per-database OID; we use a fixed
+	// sentinel and render its value as hstore text (clients scan it as text).
+	oidHstore = 16400
 )
 
 // strictDeclOID maps a declared type we can advertise faithfully (and encode in
@@ -130,6 +133,9 @@ func oidForColumn(col core.Column, rows [][]core.Value, idx int) uint32 {
 	// would see a string, so trust the marker.
 	if strings.Contains(strings.ToUpper(col.DeclType), "DECIMALTEXT") {
 		return oidNumeric
+	}
+	if strings.EqualFold(strings.TrimSpace(col.DeclType), "hstore") {
+		return oidHstore
 	}
 	// A faithfully-mappable declared type wins over value sampling (which would
 	// e.g. see a boolean's 0/1 as int, or a json string as text).
@@ -230,6 +236,10 @@ func encodeText(oid uint32, v core.Value) []byte {
 		if s, ok := v.(string); ok {
 			return []byte(withUTCOffset(s))
 		}
+	}
+	// hstore is stored as a JSON object; render it as hstore text.
+	if oid == oidHstore {
+		return []byte(hstoreText(asString(v)))
 	}
 	// Boolean columns may arrive as 0/1 integers or a stored 't'/'true' string;
 	// normalize to the Postgres 't'/'f' text form.
