@@ -1704,14 +1704,42 @@ func rewriteOperatorSyntax(sql string) string {
 	})
 }
 
-// reCollate matches the default collations psql attaches to comparisons; SQLite
-// has no matching collation, and they don't affect our results, so drop them.
-var reCollate = regexp.MustCompile(`(?i)\s+COLLATE\s+"?(?:default|c|posix)"?`)
+// reCollate matches a COLLATE clause with an optionally schema-qualified,
+// optionally double-quoted collation name.
+var reCollate = regexp.MustCompile(`(?i)\s+COLLATE\s+("[^"]*"|\w+)(?:\.("[^"]*"|\w+))?`)
 
+// rewriteCollate maps Postgres COLLATE onto SQLite. A case-insensitive
+// collation becomes NOCASE; C/POSIX/default and locale collations (which SQLite
+// can't reproduce) fall back to the byte-order default by dropping the clause.
+// This also means a user COLLATE never reaches SQLite as an unknown collation.
 func rewriteCollate(sql string) string {
 	return mapOutsideStrings(sql, func(code string) string {
-		return reCollate.ReplaceAllString(code, "")
+		return reCollate.ReplaceAllStringFunc(code, func(m string) string {
+			sub := reCollate.FindStringSubmatch(m)
+			name := sub[1]
+			if sub[2] != "" {
+				name = sub[2] // schema-qualified: the last part is the collation
+			}
+			name = strings.Trim(name, `"`)
+			switch strings.ToLower(name) {
+			case "decimal", "binary", "nocase", "rtrim":
+				return m // keep overlite/SQLite native collations verbatim
+			}
+			if collationIsCI(name) {
+				return " COLLATE NOCASE"
+			}
+			return ""
+		})
 	})
+}
+
+// collationIsCI reports whether a Postgres collation name denotes a
+// case-insensitive collation (by convention or ICU comparison level).
+func collationIsCI(name string) bool {
+	n := strings.ToLower(name)
+	return strings.Contains(n, "nocase") || strings.Contains(n, "insensitive") ||
+		strings.Contains(n, "ks-level1") || strings.Contains(n, "ks-level2") ||
+		strings.HasSuffix(n, "_ci") || strings.HasSuffix(n, "-ci")
 }
 
 // rewriteMatchOperators maps Postgres POSIX-regex operators onto SQLite's
