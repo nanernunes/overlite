@@ -22,6 +22,10 @@ import (
 	"overlite/server"
 )
 
+// version is stamped at build time by `make build` (-X main.version); the
+// release workflow passes the tag.
+var version = "dev"
+
 func main() {
 	if err := newRootCmd().Execute(); err != nil {
 		log.Fatal(err)
@@ -41,6 +45,7 @@ func newRootCmd() *cobra.Command {
 			"stores everything in a single SQLite file on the back.\n\n" +
 			"The database file may be given positionally or with --db; both work:\n" +
 			"  overlite shop.db\n  overlite --db shop.db",
+		Version:       version,
 		Args:          cobra.MaximumNArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
