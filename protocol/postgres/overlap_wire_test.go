@@ -22,8 +22,8 @@ func TestRangeOverlapAndContainment(t *testing.T) {
 
 	// Range overlap.
 	assert.Equal(t, 1, q(`SELECT int4range(1,10) && int4range(5,15)`))
-	assert.Equal(t, 0, q(`SELECT int4range(1,5) && int4range(5,10)`))  // [1,5) vs [5,10): touch, no overlap
-	assert.Equal(t, 1, q(`SELECT int4range(1,5,'[]') && int4range(5,10)`)) // [1,5] includes 5
+	assert.Equal(t, 0, q(`SELECT int4range(1,5) && int4range(5,10)`))       // [1,5) vs [5,10): touch, no overlap
+	assert.Equal(t, 1, q(`SELECT int4range(1,5,'[]') && int4range(5,10)`))  // [1,5] includes 5
 	assert.Equal(t, 1, q(`SELECT numrange(NULL, 10) && numrange(3, NULL)`)) // (-inf,10) & (3,+inf)
 
 	// Range contains range.

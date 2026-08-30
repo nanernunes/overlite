@@ -518,7 +518,7 @@ func rebuildCatalog(ctx context.Context, ce connExecutor, mainPath string) error
 
 // SchemaDDLTransactional reports whether schema DDL can run inside a tx (yes in
 // single-file mode, where a schema is an ordinary row/table, not an ATTACH).
-func (s *SQLite) SchemaDDLTransactional() bool        { return !schemaFilesMode }
+func (s *SQLite) SchemaDDLTransactional() bool         { return !schemaFilesMode }
 func (ss *sqliteSession) SchemaDDLTransactional() bool { return !schemaFilesMode }
 
 // CreateSchema / DropSchema on the engine's own connection (tests, convenience).

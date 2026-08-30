@@ -29,8 +29,8 @@ func rewrite(sql string) string {
 	sql = rewriteEscapeStrings(sql)
 	sql = rewriteNiladicFuncs(sql)
 	sql = rewriteInformationSchema(sql)
-	sql = rewriteObjDescription(sql) // obj_description/col_description -> pg_description lookup
-	sql = rewriteIndexUsing(sql)     // strip "USING <method>" from CREATE INDEX (pg_dump emits it)
+	sql = rewriteObjDescription(sql)        // obj_description/col_description -> pg_description lookup
+	sql = rewriteIndexUsing(sql)            // strip "USING <method>" from CREATE INDEX (pg_dump emits it)
 	sql = rewriteOperatorSyntax(sql)        // unwrap OPERATOR(=)/OPERATOR(~) before ANY/regex handling
 	sql = rewriteArrayToStringSubquery(sql) // before ARRAY(subquery) is unwrapped
 	sql = rewriteArraySubquery(sql)

@@ -118,7 +118,7 @@ func qualifyOneSchema(sql, schema string) string {
 }
 
 // skipLiteral returns the index just past a quoted run starting at i (quote q),
-// honoring doubled-quote escapes ('' or "").
+// honoring doubled-quote escapes: two single quotes, or two double quotes.
 func skipLiteral(s string, i int, q byte) int {
 	i++ // opening quote
 	for i < len(s) {

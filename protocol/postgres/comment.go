@@ -119,8 +119,8 @@ func splitDotIdent(s string) []string {
 }
 
 // unquoteSQLString turns a single-quoted SQL literal into its text value
-// (dropping the quotes and collapsing '' escapes). A bare word is returned
-// as-is.
+// (dropping the quotes and collapsing doubled single quotes). A bare word is
+// returned as-is.
 func unquoteSQLString(s string) string {
 	s = strings.TrimSpace(s)
 	if len(s) >= 2 && s[0] == '\'' && s[len(s)-1] == '\'' {
