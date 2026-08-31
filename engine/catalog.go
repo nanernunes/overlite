@@ -330,6 +330,17 @@ var registerCatalog = sync.OnceFunc(func() {
 		}
 		return sqliteTypeOID(fmt.Sprint(args[0])), nil
 	})
+	// The enum a column was declared with, recovered from its CHECK; see
+	// enumLabelsFromDDL. NULL when the column is not an enum.
+	scalar("overlite_enum_labels", 2, func(a []driver.Value) (driver.Value, error) {
+		if len(a) < 2 || a[0] == nil || a[1] == nil {
+			return nil, nil
+		}
+		if l := enumLabelsFromDDL(argStr(a[0]), argStr(a[1])); l != "" {
+			return l, nil
+		}
+		return nil, nil
+	})
 	// Declared type modifiers for information_schema.columns.
 	scalar("overlite_char_max_length", 1, func(a []driver.Value) (driver.Value, error) {
 		return typeCharMaxLength(argStr(a[0])), nil

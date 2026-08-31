@@ -292,9 +292,9 @@ complaint and behave differently, which is worse. Read this list twice.
 5. **`numeric` infix arithmetic goes through float** — storage, ordering and
    `sum`/`avg` are exact; `a * b` in a `SELECT` is not. Use `dec_mul`/`dec_add`
    where exactness is contractual (money totals).
-6. **`ALTER TABLE ADD CONSTRAINT`** (PK/FK/CHECK) is accepted and not enforced —
-   this is deliberate, `pg_dump` restore depends on it, but a constraint you add
-   post-hoc protects nothing.
+6. **`ALTER TABLE ADD CONSTRAINT`** rebuilds the table to apply the constraint,
+   so adding one to a large table costs a copy — and an existing row that
+   violates it makes the statement fail rather than pass silently.
 7. **Isolation level clauses** are accepted with no effect.
 8. **`CREATE EXTENSION`** is a no-op — succeeds even for PostGIS.
 9. **`::point` / `::inet` casts** succeed; the operators don't exist.

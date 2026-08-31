@@ -209,7 +209,13 @@ FROM @MASTER@ tbl
 WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%' AND tbl.name NOT GLOB '_overlite_*'
   AND EXISTS(SELECT 1 FROM pragma_table_info(tbl.name,'@DB@') WHERE pk>0)`
 
-const pgAttributeTmpl = `SELECT CAST(m.rowid + @OFF@ AS INTEGER) AS attrelid, ti.name AS attname, overlite_type_oid(ti.type) AS atttypid,
+const pgAttributeTmpl = `SELECT CAST(m.rowid + @OFF@ AS INTEGER) AS attrelid, ti.name AS attname,
+ COALESCE(
+  (SELECT t.rowid + 90000000 FROM _overlite_enum_types t
+    WHERE (SELECT group_concat(label) FROM (SELECT label FROM _overlite_enums
+             WHERE typname = t.typname ORDER BY sortorder))
+          = overlite_enum_labels((SELECT sql FROM @MASTER@ WHERE name = m.name), ti.name)),
+  overlite_type_oid(ti.type)) AS atttypid,
  -1 AS attstattarget, -1 AS attlen, ti.cid + 1 AS attnum, 0 AS attndims, -1 AS attcacheoff, -1 AS atttypmod,
  0 AS attbyval, 'p' AS attstorage, 'i' AS attalign,
  CASE WHEN ti."notnull"=1 OR ti.pk>0 THEN 1 ELSE 0 END AS attnotnull,

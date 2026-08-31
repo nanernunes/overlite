@@ -147,7 +147,7 @@ There schema DDL can't run in a transaction (`ATTACH` can't).
 High level, at a glance — including what's still needed to be **Postgres-ready
 for a real production system**. ✅ done · 🟡 partial · ⬜ not yet.
 
-Across the full feature matrix — **157 items: ✅ 141 · 🟡 15 · ⬜ 1**
+Across the full feature matrix — **157 items: ✅ 142 · 🟡 14 · ⬜ 1**
 (90% done, 99% at least partial):
 
 | Area | ✅ | 🟡 | ⬜ |
@@ -155,7 +155,7 @@ Across the full feature matrix — **157 items: ✅ 141 · 🟡 15 · ⬜ 1**
 | Wire protocol | 14 | 0 | 0 |
 | Authentication | 9 | 0 | 0 |
 | DML (queries) | 12 | 1 | 0 |
-| DDL (schema) | 29 | 6 | 0 |
+| DDL (schema) | 30 | 5 | 0 |
 | Data types | 11 | 4 | 0 |
 | Transactions | 8 | 1 | 0 |
 | Schemas | 10 | 0 | 0 |
@@ -186,8 +186,8 @@ of gaps — 🟡 **partial** (works, with caveats) · ⬜ **not implemented**.
 - 🟡 **range & geometric/network types** — ranges work (text-stored, constructors,
   accessors, `@>`, `&&`), but the closed `[a,b]` form is ambiguous with a
   2-element array; `point`/`box`/… and `inet`/`cidr`/`macaddr` aren't modeled.
-- 🟡 **enum columns** — enforced via `TEXT` + `CHECK`, listed in `\dT+`, but no
-  ordering/comparison.
+- 🟡 **enum columns** — enforced via `TEXT` + `CHECK` and reported with the
+  enum's own type (so a dump round-trips), but no ordering/comparison.
 - 🟡 **composite types** — `CREATE TYPE … AS (…)` shows in `pg_type`/`\dT`, but the
   fields aren't modeled.
 - 🟡 **`interval`** — `ts ± interval '1 day'` and `age()` work; no bare `interval`
@@ -207,8 +207,6 @@ of gaps — 🟡 **partial** (works, with caveats) · ⬜ **not implemented**.
 
 ### DDL & constraints
 
-- 🟡 **`ALTER TABLE ADD`** PRIMARY KEY / FOREIGN KEY / CHECK — accepted but not
-  enforced (a `pg_dump` restore relies on this).
 - 🟡 **`information_schema.check_constraints`** — empty (SQLite checks are
   indistinguishable from the enum-backing `IN (…)` checks).
 

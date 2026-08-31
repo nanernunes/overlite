@@ -25,16 +25,32 @@ func (s *session) tryAlterTable(sql string) (string, bool, error) {
 	if len(f) > 3 && strings.EqualFold(f[2], "if") && strings.EqualFold(f[3], "exists") {
 		i = 4
 	}
+	// pg_dump writes ALTER TABLE ONLY <table>; ONLY is about inheritance,
+	// which does not exist here, so it is simply not the table name.
+	if i < len(f) && strings.EqualFold(f[i], "only") {
+		i++
+	}
 	if i >= len(f) {
 		return "", false, nil
 	}
-	table := unquoteIdent(f[i])
+	// Clients qualify with public.; in SQLite that schema is the unqualified
+	// name, while any other schema really is part of the table's name.
+	table := unquoteIdent(rePublic.ReplaceAllString(f[i], ""))
 	rest := f[i+1:]
 	if len(rest) == 0 {
 		return "", false, nil
 	}
 	switch strings.ToUpper(rest[0]) {
 	case "ADD":
+		// A rebuild puts the constraint in the CREATE TABLE, where the catalog
+		// reads it back as a constraint rather than as a bare index — which is
+		// what lets a dump round-trip. Both fallbacks below keep a restore that
+		// used to succeed from starting to fail.
+		if clause, ok := parseAddConstraint(sql); ok {
+			if err := s.alterAddConstraint(table, clause); err == nil {
+				return "ALTER TABLE", true, nil
+			}
+		}
 		if hasWord(rest, "unique") && !hasWord(rest, "primary") {
 			return "ALTER TABLE", true, s.alterAddUnique(sql, table)
 		}
@@ -69,13 +85,20 @@ func alterTableHandled(sql string) bool {
 	if len(f) > 3 && strings.EqualFold(f[2], "if") && strings.EqualFold(f[3], "exists") {
 		i = 4
 	}
+	if i < len(f) && strings.EqualFold(f[i], "only") {
+		i++
+	}
 	rest := f[min(i+1, len(f)):]
 	if len(rest) == 0 {
 		return false
 	}
 	switch strings.ToUpper(rest[0]) {
 	case "ADD":
-		return hasWord(rest, "unique") && !hasWord(rest, "primary")
+		if hasWord(rest, "unique") && !hasWord(rest, "primary") {
+			return true
+		}
+		_, ok := parseAddConstraint(sql)
+		return ok
 	case "ALTER":
 		return true
 	case "SET":
@@ -450,4 +473,99 @@ func dropDefault(cons string) string {
 		}
 	}
 	return strings.TrimSpace(cons[:i] + cons[j:])
+}
+
+// indexWordFold finds sub in s, case-insensitively, or -1.
+func indexWordFold(s, sub string) int {
+	return strings.Index(strings.ToUpper(s), strings.ToUpper(sub))
+}
+
+// --- ADD CONSTRAINT ---------------------------------------------------------
+
+// parseAddConstraint extracts the table-level constraint clause from an
+// ALTER TABLE … ADD [CONSTRAINT name] {PRIMARY KEY|FOREIGN KEY|CHECK} … and
+// returns it in the form a CREATE TABLE accepts.
+func parseAddConstraint(sql string) (string, bool) {
+	body := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(sql), ";"))
+	i := indexWordFold(body, " ADD ")
+	if i < 0 {
+		return "", false
+	}
+	clause := strings.TrimSpace(body[i+len(" ADD "):])
+
+	// The name is optional; keep it when given so a later dump reads the same.
+	name := ""
+	if f := strings.Fields(clause); len(f) >= 2 && strings.EqualFold(f[0], "constraint") {
+		name = f[1]
+		clause = strings.TrimSpace(clause[strings.Index(clause, f[1])+len(f[1]):])
+	}
+
+	up := strings.ToUpper(clause)
+	switch {
+	case strings.HasPrefix(up, "PRIMARY KEY"), strings.HasPrefix(up, "CHECK"),
+		strings.HasPrefix(up, "UNIQUE"):
+	case strings.HasPrefix(up, "FOREIGN KEY"):
+		clause = rePublic.ReplaceAllString(clause, "")
+	default:
+		return "", false // UNIQUE, EXCLUDE, anything else
+	}
+
+	// NOT VALID says "do not check the existing rows", which SQLite has no way
+	// to express: the constraint is checked as the rebuild copies them.
+	if j := indexWordFold(clause, " NOT VALID"); j >= 0 {
+		clause = strings.TrimSpace(clause[:j])
+	}
+	if name != "" {
+		clause = "CONSTRAINT " + name + " " + clause
+	}
+	return clause, true
+}
+
+// alterAddConstraint applies a table-level constraint by rebuilding the table
+// with it in the CREATE TABLE, which is the only way SQLite takes one after the
+// fact. The rebuild copies the rows, so an existing violation surfaces here as
+// an error rather than as a constraint that silently does not hold.
+func (s *session) alterAddConstraint(table, clause string) error {
+	ddl := s.tableDDL(table)
+	if ddl == "" {
+		return fmt.Errorf("unknown table %q", table)
+	}
+	newDDL, ok := insertTableConstraint(ddl, clause)
+	if !ok {
+		return fmt.Errorf("cannot place constraint in DDL for %q", table)
+	}
+	return s.rebuildTable(table, newDDL)
+}
+
+// insertTableConstraint puts clause at the end of a CREATE TABLE's column list,
+// where SQLite reads it as a table constraint. It walks to the paren that
+// closes the list rather than the last one in the string, so a DEFAULT (expr)
+// or a trailing clause after the list does not mislead it.
+func insertTableConstraint(ddl, clause string) (string, bool) {
+	open := strings.Index(ddl, "(")
+	if open < 0 {
+		return "", false
+	}
+	depth, inStr := 0, byte(0)
+	for i := open; i < len(ddl); i++ {
+		c := ddl[i]
+		if inStr != 0 {
+			if c == inStr {
+				inStr = 0
+			}
+			continue
+		}
+		switch c {
+		case '\'', '"', '`':
+			inStr = c
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return ddl[:i] + ", " + clause + ddl[i:], true
+			}
+		}
+	}
+	return "", false
 }
