@@ -20,21 +20,34 @@ tooling. overlite puts a PostgreSQL-speaking server in front of it so you get:
 ## Quick start
 
 ```sh
-make build
-./bin/overlite                 # creates ./postgres.db, listens on :5432
-./bin/overlite shop.db         # or point it at a file (same as --db shop.db)
+$ overlite sample.db
 ```
 
-Connect with any Postgres client:
+It listens on `:5432` and creates the file if it isn't there. The file name is
+the database name, so this one is `sample`. Connect with any Postgres client:
 
 ```sh
-psql "postgresql://postgres@127.0.0.1:5432/postgres?sslmode=disable"
+psql "postgresql://postgres@127.0.0.1:5432/sample?sslmode=disable"
 ```
 
-```sql
-CREATE TABLE users (id SERIAL PRIMARY KEY, name TEXT NOT NULL, profile JSONB);
-INSERT INTO users (name, profile) VALUES ('ada', '{"role":"admin"}');
-SELECT id, name, profile ->> 'role' AS role FROM users;
+### Docker
+
+```sh
+$ touch sample.db
+$ docker run --rm -p 5432:5432 -v "$PWD/sample.db:/data/sample.db" nanernunes/overlite sample.db
+```
+
+`touch` first so Docker mounts a file rather than creating a directory in its
+place — an empty file is already a valid empty SQLite database. The image binds
+`0.0.0.0` inside the container and writes straight through to the file you
+mounted, so `sample.db` stays a plain SQLite file on the host. On a
+SELinux host (Fedora, RHEL) append `:Z` to the mount.
+
+### From source
+
+```sh
+$ make build
+$ ./bin/overlite sample.db
 ```
 
 ## Configuration
@@ -58,7 +71,7 @@ The port belongs to the driver — postgres defaults to 5432 — and is only
 overridden if you set `<DRIVER>_PORT` (e.g. `POSTGRES_PORT`).
 
 ```sh
-POSTGRES_PASSWORD=secret POSTGRES_PORT=5544 ./bin/overlite --db shop.db
+POSTGRES_PASSWORD=secret POSTGRES_PORT=5544 overlite shop.db
 # -> database "shop", user "postgres", password auth, on :5544
 ```
 
