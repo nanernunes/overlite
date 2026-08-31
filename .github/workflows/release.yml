@@ -7,14 +7,9 @@ on:
 permissions:
   contents: write
 
-# One job builds every platform and uploads once.
-#
-# This was a matrix, one job per platform, and it raced: six jobs creating the
-# same release at the same moment, and whoever lost failed the upload. With
-# fail-fast that cancelled the other five, and v0.1.1 went out carrying the
-# darwin and windows binaries and neither linux one — the two `install.sh`
-# fetches. Go cross-compiles for nothing, so the matrix bought parallelism
-# nobody needed and cost the release.
+# One job builds every platform and uploads once. Go cross-compiles without a
+# toolchain per target, so a build matrix would only add jobs racing to create
+# the same release.
 jobs:
   release:
     runs-on: ubuntu-latest
@@ -30,20 +25,16 @@ jobs:
         run: |
           set -eu
           mkdir -p dist
-          # The CLI knows nothing about what a provider manages, so it runs
-          # wherever somebody has providers to drive — a cloud provider is HTTP
-          # and nothing else.
           for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
             GOOS=${target%/*}
             GOARCH=${target#*/}
             export GOOS GOARCH
             make build
 
-            # A bare binary rather than an archive, because a person installs
-            # this one by hand: `curl -o overlite` and it is done, with no tar
-            # step. The name carries no version — GitHub's
-            # releases/latest/download/ URL only resolves a fixed asset name,
-            # and the tag already says which release this is.
+            # A bare binary rather than an archive: one file to download and
+            # run, with no unpack step. The name carries no version — the tag
+            # already says which release this is, and a fixed asset name is
+            # what GitHub's releases/latest/download/ URL can resolve.
             name=overlite-$GOOS-$GOARCH
             built=bin/overlite
             if [ "$GOOS" = windows ]; then
