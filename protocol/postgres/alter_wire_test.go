@@ -132,15 +132,15 @@ func TestEnumColumnKeepsItsType(t *testing.T) {
 		return
 	}
 
-	// The oid is right immediately; the name format_type renders comes from a
-	// registry loaded when a connection opens, so a type created after that is
-	// not in it yet. pg_dump always connects fresh, which is the case that
-	// matters — c2 is that client.
-	oid, _ := typeOf(c1, "m")
+	// On the connection that created the type, whose registry was loaded before
+	// the type existed...
+	oid, name := typeOf(c1, "m")
 	assert.Greater(t, oid, uint32(90000000), "an enum column reports the enum's oid, not text's")
+	assert.Equal(t, "mood", name)
 
+	// ...and on a client that connects afterwards, which is what pg_dump is.
 	c2 := connect(t, addr)
-	_, name := typeOf(c2, "m")
+	_, name = typeOf(c2, "m")
 	assert.Equal(t, "mood", name)
 
 	// A plain text column must not be mistaken for one.

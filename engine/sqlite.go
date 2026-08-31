@@ -80,7 +80,14 @@ type sqliteSession struct {
 }
 
 func (ss *sqliteSession) Execute(ctx context.Context, sql string, args []core.Value) (*core.ResultSet, error) {
-	return execute(ctx, ss.conn, sql, args)
+	rs, err := execute(ctx, ss.conn, sql, args)
+	// format_type() renders an enum from a registry loaded when the connection
+	// opens. Without this, a type created later in the same session renders as
+	// its storage type (text) until the client reconnects.
+	if err == nil && strings.Contains(sql, enumTypesTable) {
+		refreshEnumNamesFrom(ctx, ss.conn)
+	}
+	return rs, err
 }
 func (ss *sqliteSession) Describe(ctx context.Context, sql string, args []core.Value) ([]core.Column, error) {
 	return describe(ctx, ss.conn, sql, args)

@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"context"
+	"database/sql"
 	"strconv"
 	"strings"
 	"sync"
@@ -119,4 +121,26 @@ func sqlStringLiterals(s string) []string {
 		out = append(out, b.String())
 	}
 	return out
+}
+
+// enumTypesTable is the table whose writes invalidate the oid->name registry.
+const enumTypesTable = "_overlite_enum_types"
+
+// refreshEnumNamesFrom reloads the registry format_type() reads, from the
+// connection that just changed it.
+func refreshEnumNamesFrom(ctx context.Context, c *sql.Conn) {
+	rows, err := c.QueryContext(ctx,
+		"SELECT (rowid + "+strconv.Itoa(enumOIDBase)+") || ':' || typname FROM "+enumTypesTable)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	var pairs []string
+	for rows.Next() {
+		var v string
+		if rows.Scan(&v) == nil {
+			pairs = append(pairs, v)
+		}
+	}
+	refreshEnumNames(pairs)
 }
