@@ -41,3 +41,13 @@ jobs:
           build-args: VERSION=${{ github.ref_name }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      # Docker Hub has no idea what is in the repo, so the Overview tab stays
+      # empty unless something pushes the README into it. Needs the token to
+      # carry read/write/delete — pushing an image only needs read/write.
+      - uses: peter-evans/dockerhub-description@v5
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: nanernunes/overlite
+          short-description: "Speak PostgreSQL, store SQLite."
+          enable-url-completion: true

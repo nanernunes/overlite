@@ -1,8 +1,10 @@
-<p align="center">
-  <img src="assets/overlite.png" alt="overlite" width="180">
-</p>
+# Overlite
 
-# overlite
+[![ci](https://github.com/nanernunes/overlite/actions/workflows/ci.yml/badge.svg)](https://github.com/nanernunes/overlite/actions/workflows/ci.yml)
+[![release](https://img.shields.io/github/v/release/nanernunes/overlite?label=release)](https://github.com/nanernunes/overlite/releases/latest)
+[![docker](https://img.shields.io/docker/v/nanernunes/overlite?label=docker&sort=semver)](https://hub.docker.com/r/nanernunes/overlite)
+
+<img src="assets/overlite.png" alt="overlite" width="180">
 
 **Speak PostgreSQL, store SQLite.** overlite is a lightweight server that talks
 the PostgreSQL wire protocol on the front and keeps all your data in a single
