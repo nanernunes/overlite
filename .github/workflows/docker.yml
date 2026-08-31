@@ -7,7 +7,11 @@ on:
 # Needs DOCKERHUB_USERNAME and DOCKERHUB_TOKEN (a Docker Hub access token, not
 # the account password) in the repository secrets.
 jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+
   push:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

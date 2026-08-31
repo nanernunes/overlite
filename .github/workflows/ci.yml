@@ -4,6 +4,9 @@ on:
   push:
     branches: [master]
   pull_request:
+  # release.yml and docker.yml call this workflow, so a tag cannot publish
+  # anything these checks would have caught.
+  workflow_call:
 
 jobs:
   check:
@@ -13,9 +16,5 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: gofmt
-        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
-      - name: vet
-        run: go vet ./...
-      - name: test
-        run: go test ./...
+      # The same command a developer runs: vet, the suite, and a gofmt check.
+      - run: make check

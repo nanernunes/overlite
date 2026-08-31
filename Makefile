@@ -1,5 +1,9 @@
 .PHONY: test build run fmt vet check clean tidy
 
+# `make test` needs pipefail, which POSIX sh lacks — /bin/sh is dash on Ubuntu,
+# where the recipe would die on "Illegal option -o pipefail".
+SHELL := /bin/bash
+
 # The release workflow exports GOOS to cross-compile; locally it falls back to
 # whatever this machine is.
 GOOS ?= $(shell go env GOOS)
