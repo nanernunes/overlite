@@ -299,6 +299,12 @@ func parseCopyData(cs *copyStmt, numCols int, data []byte) ([][]core.Value, erro
 	}
 	var rows [][]core.Value
 	for i, line := range strings.Split(text, "\n") {
+		// A lone \. ends the data. pg_dump writes one after every COPY block
+		// and psql forwards it as ordinary CopyData, so without this the
+		// marker is read as a one-field row and the whole load fails.
+		if line == `\.` {
+			break
+		}
 		fields := strings.Split(line, string(cs.delimiter))
 		if len(fields) != numCols {
 			return nil, fmt.Errorf("COPY row %d has %d fields, expected %d", i+1, len(fields), numCols)

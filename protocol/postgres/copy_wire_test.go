@@ -87,3 +87,22 @@ func TestCopyDumpRestore(t *testing.T) {
 	require.NoError(t, conn.QueryRow(ctx, `SELECT count(*) FROM dst`).Scan(&n))
 	assert.Equal(t, 3, n)
 }
+
+// TestCopyEndOfDataMarker feeds the terminator pg_dump writes after every COPY
+// block. psql forwards it as ordinary data, so the server has to read it as the
+// end of the stream rather than as a row — the COPY TO STDOUT above never emits
+// one, which is how restoring a dump could lose every table's rows unnoticed.
+func TestCopyEndOfDataMarker(t *testing.T) {
+	conn := connect(t, startServer(t))
+	ctx := context.Background()
+	mustExec(t, conn, `CREATE TABLE t (id INTEGER, nome TEXT)`)
+
+	data := strings.NewReader("1\tana\n2\tbob\n\\.\n")
+	tag, err := conn.PgConn().CopyFrom(ctx, data, `COPY t (id, nome) FROM STDIN`)
+	require.NoError(t, err)
+	assert.EqualValues(t, 2, tag.RowsAffected())
+
+	var n int
+	require.NoError(t, conn.QueryRow(ctx, `SELECT count(*) FROM t`).Scan(&n))
+	assert.Equal(t, 2, n)
+}
