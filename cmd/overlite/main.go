@@ -56,6 +56,8 @@ func newRootCmd() *cobra.Command {
 			return run(driver, host, db)
 		},
 	}
+	// Cobra's default is "overlite version v0.1.0"; the word adds nothing.
+	cmd.SetVersionTemplate("{{.Name}} {{.Version}}\n")
 	cmd.Flags().StringVar(&driver, "driver", envOr("OVERLITE_DRIVER", "postgres"),
 		"wire protocol to speak (OVERLITE_DRIVER)")
 	cmd.Flags().StringVar(&host, "host", "127.0.0.1", "listen address")
