@@ -34,7 +34,7 @@ psql "postgresql://postgres@localhost:5432/postgres?sslmode=disable"
 
 ```sh
 $ touch postgres.db
-$ docker run --rm -p 5432:5432 -v "$PWD/postgres.db:/data/postgres.db" nanernunes/overlite postgres.db
+$ docker run --rm -p 5432:5432 -v "$(pwd)/postgres.db:/data/postgres.db" nanernunes/overlite postgres.db
 ```
 
 `touch` first so Docker mounts a file rather than creating a directory in its
