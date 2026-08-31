@@ -192,6 +192,7 @@ const pgClassTmpl = `SELECT CAST(m.rowid + @OFF@ AS INTEGER) AS oid, substr(m.na
  (SELECT count(*) FROM pragma_table_info(m.name,'@DB@')) AS relnatts,
  0 AS relchecks, 0 AS relhasrules,
  CASE WHEN EXISTS(SELECT 1 FROM @MASTER@ trg WHERE trg.type='trigger' AND trg.tbl_name=m.name)
+       OR (m.type='table' AND EXISTS(SELECT 1 FROM pragma_foreign_key_list(m.name,'@DB@')))
       THEN 1 ELSE 0 END AS relhastriggers,
  0 AS relhassubclass,
  COALESCE((SELECT enabled FROM _overlite_rls rls WHERE lower(rls.tablename)=lower(m.name)),0) AS relrowsecurity,
