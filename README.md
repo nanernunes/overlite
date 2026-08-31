@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/overlite.png" alt="overlite" width="180">
+</p>
+
 # overlite
 
 **Speak PostgreSQL, store SQLite.** overlite is a lightweight server that talks
@@ -160,6 +164,10 @@ Across the full feature matrix — **157 items: ✅ 141 · 🟡 15 · ⬜ 1**
 Every ✅ is exercised end-to-end against real `psql` and pgx (`make test`). The
 remaining 🟡/⬜ items — the gap to a drop-in production Postgres — are listed in
 full under [Limitations](#limitations).
+
+Deciding whether to migrate? [**overlite vs
+PostgreSQL**](POSTGRES_ROADMAP.md) goes subsystem by subsystem — what you get,
+what is planned, and what will never be there because it belongs to SQLite.
 
 ## Limitations
 
