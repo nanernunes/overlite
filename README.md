@@ -20,34 +20,45 @@ tooling. overlite puts a PostgreSQL-speaking server in front of it so you get:
 ## Quick start
 
 ```sh
-$ overlite sample.db
+$ overlite postgres.db
 ```
 
 It listens on `:5432` and creates the file if it isn't there. The file name is
-the database name, so this one is `sample`. Connect with any Postgres client:
+the database name, so this one is `postgres`. Connect with any Postgres client:
 
 ```sh
-psql "postgresql://postgres@127.0.0.1:5432/sample?sslmode=disable"
+psql "postgresql://postgres@localhost:5432/postgres?sslmode=disable"
 ```
 
 ### Docker
 
 ```sh
-$ touch sample.db
-$ docker run --rm -p 5432:5432 -v "$PWD/sample.db:/data/sample.db" nanernunes/overlite sample.db
+$ touch postgres.db
+$ docker run --rm -p 5432:5432 -v "$PWD/postgres.db:/data/postgres.db" nanernunes/overlite postgres.db
 ```
 
 `touch` first so Docker mounts a file rather than creating a directory in its
 place — an empty file is already a valid empty SQLite database. The image binds
 `0.0.0.0` inside the container and writes straight through to the file you
-mounted, so `sample.db` stays a plain SQLite file on the host. On a
-SELinux host (Fedora, RHEL) append `:Z` to the mount.
+mounted, so `postgres.db` stays a plain SQLite file on the host. Podman needs
+`:Z` on the mount for SELinux to allow that write.
 
-### From source
+### compose.yaml
+
+```yaml
+services:
+  overlite:
+    image: nanernunes/overlite
+    command: postgres.db
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./postgres.db:/data/postgres.db
+```
 
 ```sh
-$ make build
-$ ./bin/overlite sample.db
+$ touch postgres.db
+$ docker compose up
 ```
 
 ## Configuration
