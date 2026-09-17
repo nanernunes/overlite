@@ -323,6 +323,21 @@ func encodeBinary(oid uint32, v core.Value) []byte {
 			return raw
 		}
 		return encodeText(oidText, v)
+	case oidTimestamp, oidTimestamptz:
+		if tm, ok := parseStoredTime(v); ok {
+			return encodeBinaryTimestamp(tm)
+		}
+		return encodeText(oidText, v)
+	case oidDate:
+		if tm, ok := parseStoredTime(v); ok {
+			return encodeBinaryDate(tm)
+		}
+		return encodeText(oidText, v)
+	case oidTime:
+		if tm, ok := parseStoredTime(v); ok {
+			return encodeBinaryTime(tm)
+		}
+		return encodeText(oidText, v)
 	default: // text, json, varchar, bpchar, ...: UTF-8 bytes
 		return encodeText(oidText, v)
 	}

@@ -22,6 +22,11 @@ func frag(tmpl string, r schemaRef) string {
 		// public and for multi-file schemas.
 		"@PLEN@", strconv.Itoa(len(r.Prefix)+1),
 		"@ROLE@", sqlQuote(catalogRole),
+		// The catalog columns must name the database the client sees from
+		// current_database(); reporting SQLite's internal "main" made every
+		// information_schema query filtered by catalog return nothing, which
+		// is how gorm's migrator asks whether a table's columns exist.
+		"@DBNAME@", sqlQuote(catalogDBName),
 	).Replace(tmpl)
 }
 
@@ -301,7 +306,7 @@ FROM @MASTER@ tbl JOIN pragma_index_list(tbl.name,'@DB@') il
 WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%' AND tbl.name NOT GLOB '_overlite_*'
   AND il.origin='u' AND il."unique"=1`
 
-const infoTablesTmpl = `SELECT 'main' AS table_catalog, '@PG@' AS table_schema, substr(name,@PLEN@) AS table_name,
+const infoTablesTmpl = `SELECT @DBNAME@ AS table_catalog, '@PG@' AS table_schema, substr(name,@PLEN@) AS table_name,
  CASE type WHEN 'view' THEN 'VIEW' ELSE 'BASE TABLE' END AS table_type
 FROM @MASTER@ WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%' AND name NOT GLOB '_overlite_*'`
 
@@ -325,7 +330,7 @@ const pgViewsTmpl = `SELECT '@PG@' AS schemaname, substr(name,@PLEN@) AS viewnam
  @ROLE@ AS viewowner, sql AS definition
 FROM @MASTER@ WHERE type='view' AND name NOT LIKE 'sqlite_%' AND name NOT GLOB '_overlite_*'`
 
-const infoColumnsTmpl = `SELECT 'main' AS table_catalog, '@PG@' AS table_schema, substr(m.name,@PLEN@) AS table_name,
+const infoColumnsTmpl = `SELECT @DBNAME@ AS table_catalog, '@PG@' AS table_schema, substr(m.name,@PLEN@) AS table_name,
  ti.name AS column_name, ti.cid + 1 AS ordinal_position, ti.dflt_value AS column_default,
  CASE WHEN ti."notnull"=1 OR ti.pk>0 THEN 'NO' ELSE 'YES' END AS is_nullable,
  format_type(overlite_type_oid(ti.type), NULL) AS data_type,
@@ -334,8 +339,12 @@ const infoColumnsTmpl = `SELECT 'main' AS table_catalog, '@PG@' AS table_schema,
  CASE WHEN overlite_numeric_precision(ti.type) IS NOT NULL THEN 10 END AS numeric_precision_radix,
  overlite_numeric_scale(ti.type) AS numeric_scale,
  NULL AS datetime_precision,
- 'main' AS udt_catalog, 'pg_catalog' AS udt_schema,
- format_type(overlite_type_oid(ti.type), NULL) AS udt_name,
+ @DBNAME@ AS udt_catalog, 'pg_catalog' AS udt_schema,
+ -- udt_name is the pg_type name (int4, timestamp), not the SQL standard
+ -- spelling that data_type carries. Clients join information_schema.columns to
+ -- pg_type on it, and that join finds nothing when the two are the same.
+ COALESCE((SELECT pt.typname FROM pg_type pt WHERE pt.oid = overlite_type_oid(ti.type)),
+          format_type(overlite_type_oid(ti.type), NULL)) AS udt_name,
  NULL AS collation_name, NULL AS domain_catalog, NULL AS domain_schema, NULL AS domain_name,
  ti.cid + 1 AS dtd_identifier, 'NO' AS is_identity, 'NO' AS is_generated,
  'NEVER' AS identity_generation, 'YES' AS is_updatable,
@@ -350,8 +359,8 @@ WHERE m.type='table' AND m.name NOT LIKE 'sqlite_%' AND m.name NOT GLOB '_overli
 // match pg_constraint: "<table>_pkey" for the primary key, "fk_<table>_<id>" for
 // a foreign key, and the index name for a UNIQUE constraint.
 
-const infoTableConstraintsTmpl = `SELECT 'main' AS constraint_catalog, '@PG@' AS constraint_schema,
- tbl.name || '_pkey' AS constraint_name, 'main' AS table_catalog, '@PG@' AS table_schema,
+const infoTableConstraintsTmpl = `SELECT @DBNAME@ AS constraint_catalog, '@PG@' AS constraint_schema,
+ tbl.name || '_pkey' AS constraint_name, @DBNAME@ AS table_catalog, '@PG@' AS table_schema,
  tbl.name AS table_name, 'PRIMARY KEY' AS constraint_type, 'NO' AS is_deferrable,
  'NO' AS initially_deferred, 'YES' AS enforced
 FROM @MASTER@ tbl
@@ -370,8 +379,8 @@ FROM @MASTER@ tbl JOIN pragma_index_list(tbl.name,'@DB@') il
 WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%' AND tbl.name NOT GLOB '_overlite_*'
   AND il.origin='u' AND il."unique"=1`
 
-const infoKeyColumnUsageTmpl = `SELECT 'main' AS constraint_catalog, '@PG@' AS constraint_schema,
- tbl.name || '_pkey' AS constraint_name, 'main' AS table_catalog, '@PG@' AS table_schema,
+const infoKeyColumnUsageTmpl = `SELECT @DBNAME@ AS constraint_catalog, '@PG@' AS constraint_schema,
+ tbl.name || '_pkey' AS constraint_name, @DBNAME@ AS table_catalog, '@PG@' AS table_schema,
  tbl.name AS table_name, ti.name AS column_name, ti.pk AS ordinal_position,
  NULL AS position_in_unique_constraint
 FROM @MASTER@ tbl JOIN pragma_table_info(tbl.name,'@DB@') ti
@@ -390,15 +399,15 @@ FROM @MASTER@ tbl JOIN pragma_index_list(tbl.name,'@DB@') il
 WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%' AND tbl.name NOT GLOB '_overlite_*'
   AND il.origin='u' AND il."unique"=1`
 
-const infoReferentialConstraintsTmpl = `SELECT 'main' AS constraint_catalog, '@PG@' AS constraint_schema,
- 'fk_' || tbl.name || '_' || fk.id AS constraint_name, 'main' AS unique_constraint_catalog,
+const infoReferentialConstraintsTmpl = `SELECT @DBNAME@ AS constraint_catalog, '@PG@' AS constraint_schema,
+ 'fk_' || tbl.name || '_' || fk.id AS constraint_name, @DBNAME@ AS unique_constraint_catalog,
  '@PG@' AS unique_constraint_schema, fk."table" || '_pkey' AS unique_constraint_name,
  'NONE' AS match_option, fk.on_update AS update_rule, fk.on_delete AS delete_rule
 FROM @MASTER@ tbl JOIN pragma_foreign_key_list(tbl.name,'@DB@') fk
 WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%' AND tbl.name NOT GLOB '_overlite_*' AND fk.seq=0`
 
-const infoConstraintColumnUsageTmpl = `SELECT 'main' AS table_catalog, '@PG@' AS table_schema,
- tbl.name AS table_name, ti.name AS column_name, 'main' AS constraint_catalog,
+const infoConstraintColumnUsageTmpl = `SELECT @DBNAME@ AS table_catalog, '@PG@' AS table_schema,
+ tbl.name AS table_name, ti.name AS column_name, @DBNAME@ AS constraint_catalog,
  '@PG@' AS constraint_schema, tbl.name || '_pkey' AS constraint_name
 FROM @MASTER@ tbl JOIN pragma_table_info(tbl.name,'@DB@') ti
 WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%' AND tbl.name NOT GLOB '_overlite_*' AND ti.pk>0
@@ -407,7 +416,7 @@ SELECT 'main', '@PG@', fk."table", fk."to", 'main', '@PG@', 'fk_' || tbl.name ||
 FROM @MASTER@ tbl JOIN pragma_foreign_key_list(tbl.name,'@DB@') fk
 WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%' AND tbl.name NOT GLOB '_overlite_*'`
 
-const infoViewsTmpl = `SELECT 'main' AS table_catalog, '@PG@' AS table_schema, name AS table_name,
+const infoViewsTmpl = `SELECT @DBNAME@ AS table_catalog, '@PG@' AS table_schema, name AS table_name,
  sql AS view_definition, 'NONE' AS check_option, 'NO' AS is_updatable, 'NO' AS is_insertable_into,
  'NO' AS is_trigger_updatable, 'NO' AS is_trigger_deletable, 'NO' AS is_trigger_insertable_into
 FROM @MASTER@ WHERE type='view' AND name NOT LIKE 'sqlite_%' AND name NOT GLOB '_overlite_*'`

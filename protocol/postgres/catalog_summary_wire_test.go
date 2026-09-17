@@ -131,3 +131,35 @@ func TestToRegclassParameterized(t *testing.T) {
 	assert.False(t, exists("sales.nope"))
 	assert.False(t, exists("public.invoices"))
 }
+
+// information_schema names the database the client sees. Reporting SQLite's
+// internal "main" made every catalog query filtered by catalog come back
+// empty — which is how gorm's migrator asks what columns a table already has,
+// so it concluded there were none and tried to add them all again.
+func TestCatalogNamesTheClientDatabase(t *testing.T) {
+	conn := connect(t, startServer(t))
+	ctx := context.Background()
+
+	mustExec(t, conn, `CREATE TABLE t (id int primary key, label text)`)
+
+	var dbName string
+	require.NoError(t, conn.QueryRow(ctx, `SELECT current_database()`).Scan(&dbName))
+
+	var catalog string
+	require.NoError(t, conn.QueryRow(ctx,
+		`SELECT table_catalog FROM information_schema.tables WHERE table_name = 't'`).Scan(&catalog))
+	assert.Equal(t, dbName, catalog, "information_schema.tables names another database")
+
+	require.NoError(t, conn.QueryRow(ctx,
+		`SELECT table_catalog FROM information_schema.columns WHERE table_name = 't' LIMIT 1`).Scan(&catalog))
+	assert.Equal(t, dbName, catalog, "information_schema.columns names another database")
+
+	// The filter a migrator writes finds the columns.
+	var n int
+	require.NoError(t, conn.QueryRow(ctx, `
+		SELECT count(*) FROM information_schema.columns
+		WHERE table_catalog = current_database()
+		  AND table_schema = CURRENT_SCHEMA()
+		  AND table_name = 't'`).Scan(&n))
+	assert.Equal(t, 2, n)
+}

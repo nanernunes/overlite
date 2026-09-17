@@ -35,8 +35,9 @@ func (s *session) tryAlterTable(sql string) (string, bool, error) {
 		return "", false, nil
 	}
 	// Clients qualify with public.; in SQLite that schema is the unqualified
-	// name, while any other schema really is part of the table's name.
-	table := unquoteIdent(rePublic.ReplaceAllString(f[i], ""))
+	// name, while any other schema really is part of the table's name. Both
+	// halves may be quoted, which is how every ORM writes them.
+	table := unquoteRef(rePublic.ReplaceAllString(f[i], ""))
 	rest := f[i+1:]
 	if len(rest) == 0 {
 		return "", false, nil

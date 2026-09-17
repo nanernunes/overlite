@@ -255,3 +255,25 @@ func TestAddColumnComputedDefaultRebuildsSchemaAuxObjects(t *testing.T) {
 	_, err := conn.Exec(ctx, `INSERT INTO "acme"."posts" VALUES ('p2', 'nobody')`)
 	require.Error(t, err, "the foreign key stopped being enforced after the rebuild")
 }
+
+// ALTER TABLE on a schema-qualified table, in the spelling an ORM emits.
+func TestAlterTableOnQualifiedTable(t *testing.T) {
+	conn := connect(t, startServer(t))
+	ctx := context.Background()
+
+	mustExec(t, conn, `CREATE SCHEMA sales`)
+	mustExec(t, conn, `CREATE TABLE "sales"."orders" (id int primary key, total int)`)
+	mustExec(t, conn, `INSERT INTO "sales"."orders" VALUES (1, 10)`)
+
+	mustExec(t, conn, `ALTER TABLE "sales"."orders" ALTER COLUMN total TYPE bigint`)
+	mustExec(t, conn, `ALTER TABLE "sales"."orders" ADD COLUMN label text`)
+
+	var total int64
+	require.NoError(t, conn.QueryRow(ctx, `SELECT total FROM "sales"."orders" WHERE id = 1`).Scan(&total))
+	assert.Equal(t, int64(10), total)
+
+	var schema string
+	require.NoError(t, conn.QueryRow(ctx,
+		`SELECT table_schema FROM information_schema.tables WHERE table_name = 'orders'`).Scan(&schema))
+	assert.Equal(t, "sales", schema)
+}
