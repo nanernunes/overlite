@@ -195,6 +195,7 @@ func setupConnection(ctx context.Context, exec func(string) error, query func(st
 		// The set of attached schemas is the source of truth.
 		if names, err := query("SELECT name FROM pragma_database_list WHERE name NOT IN ('main','temp')"); err == nil {
 			attached = names
+			setSchemaCache(names) // search_path resolution reads this
 		}
 	}
 	// The schema registry (single-file mode reads it for the schema list; the
