@@ -655,3 +655,25 @@ func storedTableName(schema, table string) string {
 	}
 	return schema + "." + table
 }
+
+// ResolveTable implements core.SchemaManager. A table reference means different
+// things in the two storage modes: single-file keeps `sales.orders` as one
+// stored name in main, multi-file keeps `orders` inside the attached database
+// `sales`. Callers above the engine get the three spellings they need without
+// having to know which mode is in force.
+func resolveTable(ref string) (name, master, qualified string) {
+	schema, table := splitSchemaRef(ref)
+	if schema == "" || strings.EqualFold(schema, "public") {
+		return table, "main.sqlite_master", quoteIdent(table)
+	}
+	if schemaFilesMode {
+		return table, quoteIdent(schema) + ".sqlite_master", quoteIdent(schema) + "." + quoteIdent(table)
+	}
+	stored := schema + "." + table
+	return stored, "main.sqlite_master", quoteIdent(stored)
+}
+
+func (s *SQLite) ResolveTable(ref string) (string, string, string) { return resolveTable(ref) }
+func (ss *sqliteSession) ResolveTable(ref string) (string, string, string) {
+	return resolveTable(ref)
+}

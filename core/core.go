@@ -105,4 +105,11 @@ type SchemaManager interface {
 	// SetTableSchema moves a table to another schema. tableRef is the possibly
 	// schema-qualified source name ("x.t" or "t").
 	SetTableSchema(ctx context.Context, tableRef, newSchema string) error
+
+	// ResolveTable maps a possibly schema-qualified reference onto how the
+	// storage names it: the name sqlite_master holds, the sqlite_master to
+	// look in, and the qualified form to write in a statement. The three
+	// differ between the storage modes, which callers above the engine should
+	// not have to know about.
+	ResolveTable(ref string) (name, master, qualified string)
 }

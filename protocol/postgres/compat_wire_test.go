@@ -148,3 +148,53 @@ func TestAddColumnComputedDefaultExtendedProtocol(t *testing.T) {
 	require.NoError(t, conn.QueryRow(ctx, `SELECT count(*) FROM t`).Scan(&n))
 	assert.Equal(t, 1, n)
 }
+
+// The same through a schema-qualified table, which is what an ORM emits once
+// the application uses schemas at all.
+func TestAddColumnComputedDefaultOnQualifiedTable(t *testing.T) {
+	conn := connect(t, startServer(t))
+	ctx := context.Background()
+
+	mustExec(t, conn, `CREATE SCHEMA sales`)
+	mustExec(t, conn, `CREATE TABLE "sales"."orders" (id int primary key, label text)`)
+	mustExec(t, conn, `INSERT INTO "sales"."orders" VALUES (1, 'first')`)
+
+	mustExec(t, conn, `ALTER TABLE "sales"."orders" ADD COLUMN created_at timestamptz DEFAULT now()`)
+
+	var label string
+	require.NoError(t, conn.QueryRow(ctx, `SELECT label FROM "sales"."orders" WHERE id = 1`).Scan(&label))
+	assert.Equal(t, "first", label, "the rebuild lost the existing row")
+
+	mustExec(t, conn, `INSERT INTO "sales"."orders" (id, label) VALUES (2, 'second')`)
+	var createdAt string
+	require.NoError(t, conn.QueryRow(ctx,
+		`SELECT created_at FROM "sales"."orders" WHERE id = 2`).Scan(&createdAt))
+	assert.NotEmpty(t, createdAt)
+
+	// The table stayed in its schema.
+	var schema string
+	require.NoError(t, conn.QueryRow(ctx,
+		`SELECT table_schema FROM information_schema.tables WHERE table_name = 'orders'`).Scan(&schema))
+	assert.Equal(t, "sales", schema)
+}
+
+func TestAddColumnComputedDefaultQualifiedMultiFileMode(t *testing.T) {
+	t.Setenv("OVERLITE_MULTITENANT_SCHEMA", "true")
+	conn := connect(t, startServer(t))
+	ctx := context.Background()
+
+	mustExec(t, conn, `CREATE SCHEMA sales`)
+	mustExec(t, conn, `CREATE TABLE "sales"."orders" (id int primary key, label text)`)
+	mustExec(t, conn, `INSERT INTO "sales"."orders" VALUES (1, 'first')`)
+
+	mustExec(t, conn, `ALTER TABLE "sales"."orders" ADD COLUMN created_at timestamptz DEFAULT now()`)
+
+	var label string
+	require.NoError(t, conn.QueryRow(ctx, `SELECT label FROM "sales"."orders" WHERE id = 1`).Scan(&label))
+	assert.Equal(t, "first", label)
+
+	var schema string
+	require.NoError(t, conn.QueryRow(ctx,
+		`SELECT table_schema FROM information_schema.tables WHERE table_name = 'orders'`).Scan(&schema))
+	assert.Equal(t, "sales", schema, "the table left its schema in the rebuild")
+}

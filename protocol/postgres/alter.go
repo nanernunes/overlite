@@ -55,7 +55,9 @@ func (s *session) tryAlterTable(sql string) (string, bool, error) {
 			return "ALTER TABLE", true, s.alterAddUnique(sql, table)
 		}
 		if def, ok := addColumnComputedDefault(sql); ok {
-			return "ALTER TABLE", true, s.alterAddColumnDefault(table, def)
+			// The reference as written, not the unqualified name: the rebuild
+			// has to find the table in its own schema.
+			return "ALTER TABLE", true, s.alterAddColumnDefault(unquoteRef(f[i]), def)
 		}
 	case "ALTER":
 		return "ALTER TABLE", true, s.alterColumn(sql, table, rest[1:])
@@ -267,25 +269,28 @@ func (s *session) auxDDL(table string) []string {
 // rebuildTable replaces table with newDDL (same column set) via create-copy-swap
 // inside a savepoint, recreating its indexes and triggers.
 func (s *session) rebuildTable(table, newDDL string) error {
-	return s.rebuildTableCopying(table, newDDL, nil)
+	return s.rebuildTableCopying(qIdent(table), newDDL, nil, "main.sqlite_master", table)
 }
 
 // rebuildTableCopying is rebuildTable for a DDL whose column set differs from
 // the current one: copy names the columns to carry over, and any column of the
 // new table missing from it takes its default.
-func (s *session) rebuildTableCopying(table, newDDL string, copy []string) error {
-	aux := s.auxDDL(table)
-	const tmp = "_overlite_rebuild"
-	tmpDDL := renameCreateTable(newDDL, tmp)
+//
+// table is the qualified spelling to write in statements; master and name say
+// where to read the table's indexes and triggers back from.
+func (s *session) rebuildTableCopying(table, newDDL string, copy []string, master, name string) error {
+	aux := s.auxDDLIn(master, name)
+	tmp := tempRebuildName(table)
+	tmpDDL := renameCreateTableTo(newDDL, tmp)
 
-	copyStep := "INSERT INTO " + qIdent(tmp) + " SELECT * FROM " + qIdent(table)
+	copyStep := "INSERT INTO " + tmp + " SELECT * FROM " + table
 	if len(copy) > 0 {
 		quoted := make([]string, len(copy))
 		for i, c := range copy {
 			quoted[i] = qIdent(c)
 		}
 		list := strings.Join(quoted, ", ")
-		copyStep = "INSERT INTO " + qIdent(tmp) + " (" + list + ") SELECT " + list + " FROM " + qIdent(table)
+		copyStep = "INSERT INTO " + tmp + " (" + list + ") SELECT " + list + " FROM " + table
 	}
 
 	if _, err := s.exec("SAVEPOINT _rb", nil); err != nil {
@@ -299,8 +304,9 @@ func (s *session) rebuildTableCopying(table, newDDL string, copy []string) error
 	steps := []string{
 		tmpDDL,
 		copyStep,
-		"DROP TABLE " + qIdent(table),
-		"ALTER TABLE " + qIdent(tmp) + " RENAME TO " + qIdent(table),
+		"DROP TABLE " + table,
+		// RENAME TO takes a bare name: the table stays where it already is.
+		"ALTER TABLE " + tmp + " RENAME TO " + qIdent(name),
 	}
 	steps = append(steps, aux...)
 	for _, st := range steps {
@@ -318,6 +324,12 @@ func qIdent(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `
 
 // renameCreateTable replaces the table name in a CREATE TABLE with newName.
 func renameCreateTable(ddl, newName string) string {
+	return renameCreateTableTo(ddl, qIdent(newName))
+}
+
+// renameCreateTableTo is renameCreateTable for a name already rendered as SQL,
+// which a schema-qualified one has to be.
+func renameCreateTableTo(ddl, rendered string) string {
 	low := strings.ToLower(ddl)
 	i := indexWord(low, "table")
 	if i < 0 {
@@ -347,7 +359,7 @@ func renameCreateTable(ddl, newName string) string {
 			end++
 		}
 	}
-	return ddl[:j] + qIdent(newName) + ddl[end:]
+	return ddl[:j] + rendered + ddl[end:]
 }
 
 // editColumn finds the definition of col in a CREATE TABLE's column list and
@@ -662,25 +674,26 @@ func isComputedDefault(value string) bool {
 
 // alterAddColumnDefault adds a column carrying a computed default by rebuilding
 // the table with it in place.
-func (s *session) alterAddColumnDefault(table, def string) error {
-	ddl := s.tableDDL(table)
+func (s *session) alterAddColumnDefault(ref, def string) error {
+	name, master, qualified := s.resolveTable(ref)
+	ddl := s.tableDDLIn(master, name)
 	if ddl == "" {
-		return fmt.Errorf("relation %q does not exist", table)
+		return fmt.Errorf("relation %q does not exist", ref)
 	}
 	open := strings.IndexByte(ddl, '(')
 	if open < 0 {
-		return fmt.Errorf("cannot read the definition of %q", table)
+		return fmt.Errorf("cannot read the definition of %q", ref)
 	}
 	inner, after := balancedParen(ddl, open)
 
 	cols := existingColumnNames(inner)
 	if len(cols) == 0 {
-		return fmt.Errorf("cannot read the columns of %q", table)
+		return fmt.Errorf("cannot read the columns of %q", ref)
 	}
 	// The definition still carries the client's spelling; the rebuild runs it
 	// against the engine directly, so it needs the dialect rewrite applied.
 	newDDL := ddl[:open+1] + inner + ", " + rewrite(def) + ddl[after-1:]
-	return s.rebuildTableCopying(table, newDDL, cols)
+	return s.rebuildTableCopying(qualified, newDDL, cols, master, name)
 }
 
 // existingColumnNames lists the column names in a CREATE TABLE body, skipping
@@ -699,4 +712,82 @@ func existingColumnNames(inner string) []string {
 		out = append(out, unquoteIdent(name))
 	}
 	return out
+}
+
+// resolveTable asks the engine how the storage names a table reference. An
+// engine without schemas answers for the plain, unqualified case.
+func (s *session) resolveTable(ref string) (name, master, qualified string) {
+	if sm, ok := s.db.(core.SchemaManager); ok {
+		return sm.ResolveTable(ref)
+	}
+	bare := unquoteIdent(ref)
+	return bare, "main.sqlite_master", qIdent(bare)
+}
+
+// tempRebuildName places the scratch table beside the one being rebuilt.
+//
+// It has to land in the same database: in multi-file mode a schema is an
+// attached one, and building the replacement in main would leave the rebuilt
+// table in public, out of the schema it started in.
+func tempRebuildName(qualifiedTable string) string {
+	const tmp = "_overlite_rebuild"
+	// A dot inside quotes is part of a single stored name (single-file mode),
+	// not an attached-database qualifier.
+	if schema, _ := splitQualifiedRef(qualifiedTable); schema != "" {
+		return qIdent(schema) + "." + qIdent(tmp)
+	}
+	return qIdent(tmp)
+}
+
+// tableDDLIn reads a table's CREATE statement from a given sqlite_master.
+func (s *session) tableDDLIn(master, name string) string {
+	rs, err := s.exec("SELECT sql FROM "+master+" WHERE type='table' AND lower(name)=lower("+
+		sqlStr(name)+")", nil)
+	if err != nil || len(rs.Rows) == 0 {
+		return ""
+	}
+	return asString(rs.Rows[0][0])
+}
+
+// auxDDLIn reads a table's indexes and triggers from a given sqlite_master.
+func (s *session) auxDDLIn(master, name string) []string {
+	rs, err := s.exec("SELECT sql FROM "+master+" WHERE lower(tbl_name)=lower("+sqlStr(name)+
+		") AND type IN ('index','trigger') AND sql IS NOT NULL", nil)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, row := range rs.Rows {
+		if d := asString(row[0]); d != "" {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// unquoteRef strips the quoting from each part of a possibly qualified table
+// reference, leaving `schema.table` or `table`.
+func unquoteRef(ref string) string {
+	schema, table := splitQualifiedRef(ref)
+	if schema == "" {
+		return table
+	}
+	return schema + "." + table
+}
+
+// splitQualifiedRef splits `"schema"."table"` (in any combination of quoting)
+// into its unquoted parts.
+func splitQualifiedRef(ref string) (schema, table string) {
+	depth := 0
+	for i := 0; i < len(ref); i++ {
+		switch ref[i] {
+		case '"':
+			depth ^= 1
+		case '.':
+			if depth == 0 {
+				return unquoteIdent(ref[:i]), unquoteIdent(ref[i+1:])
+			}
+		}
+	}
+	return "", unquoteIdent(ref)
 }
