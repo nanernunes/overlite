@@ -113,3 +113,21 @@ func rewriteAtTimeZone(sql string) string {
 		sql = sql[:ls] + repl + sql[re:]
 	}
 }
+
+// reWholeTimestamptz matches a parameter that is entirely a timestamp carrying
+// an explicit zone — the same shape reTimestamptzLit looks for inside a
+// statement, so a value stored as a parameter and one stored as a literal come
+// out identical.
+var reWholeTimestamptz = regexp.MustCompile(
+	`^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}(?::?\d{2})?)$`)
+
+// normalizeTimestampParam converts such a parameter to bare UTC.
+func normalizeTimestampParam(s string) string {
+	if !reWholeTimestamptz.MatchString(s) {
+		return s
+	}
+	if utc, ok := toUTCLiteral(s); ok {
+		return utc
+	}
+	return s
+}

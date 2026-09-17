@@ -62,3 +62,37 @@ func encodeBinaryTime(tm time.Time) []byte {
 	midnight := time.Date(tm.Year(), tm.Month(), tm.Day(), 0, 0, 0, 0, tm.Location())
 	return appendUint64(nil, uint64(tm.Sub(midnight).Microseconds()))
 }
+
+// isTimeOID reports whether a column holds a date or time value.
+func isTimeOID(oid uint32) bool {
+	switch oid {
+	case oidDate, oidTime, oidTimestamp, oidTimestamptz:
+		return true
+	}
+	return false
+}
+
+// canonicalTimeText renders a stored time value the way Postgres writes it.
+// A value it cannot parse is passed through: better the client's own complaint
+// than a value invented here.
+func canonicalTimeText(oid uint32, s string) string {
+	tm, ok := parseStoredTime(s)
+	if !ok {
+		// Not a full timestamp, but it may still be a bare one that only needs
+		// its offset spelled out.
+		if oid == oidTimestamptz {
+			return withUTCOffset(s)
+		}
+		return s
+	}
+	switch oid {
+	case oidDate:
+		return tm.Format("2006-01-02")
+	case oidTime:
+		return tm.Format("15:04:05.999999")
+	case oidTimestamptz:
+		return tm.UTC().Format("2006-01-02 15:04:05.999999-07")
+	default:
+		return tm.Format("2006-01-02 15:04:05.999999")
+	}
+}

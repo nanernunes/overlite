@@ -232,11 +232,14 @@ func encodeText(oid uint32, v core.Value) []byte {
 	if isArrayOID(oid) {
 		return jsonArrayToPGText(v)
 	}
-	// timestamptz is stored as bare UTC text; advertise the +00 offset so clients
-	// read it as an absolute instant.
-	if oid == oidTimestamptz {
+	// A time value is rendered the way Postgres renders it, whatever shape it
+	// was stored in: a space rather than a T, at most six fractional digits,
+	// and a numeric offset rather than a Z. A client parses what the column
+	// type promised, and rejects anything else — the JDBC driver calls a
+	// trailing Z "junk".
+	if isTimeOID(oid) {
 		if s, ok := v.(string); ok {
-			return []byte(withUTCOffset(s))
+			return []byte(canonicalTimeText(oid, s))
 		}
 	}
 	// hstore is stored as a JSON object; render it as hstore text.

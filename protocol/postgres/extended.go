@@ -836,7 +836,12 @@ func formatFor(fmts []int, i int) int {
 // since we advertise unknown parameter types to steer clients toward text.
 func decodeParam(format int, raw []byte) core.Value {
 	if format == 0 {
-		return string(raw)
+		// A timestamp carrying a zone is stored the way the same value written
+		// as a literal would be: bare UTC, at Postgres' precision. Without
+		// this, how a client sent a value decided how it came back — a driver
+		// binding a Go time.Time stored nanoseconds and a "Z", which is not a
+		// timestamp any Postgres client can read.
+		return normalizeTimestampParam(string(raw))
 	}
 	switch len(raw) {
 	case 8:
