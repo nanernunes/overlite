@@ -155,6 +155,8 @@ func execute(ctx context.Context, q querier, query string, args []core.Value) (*
 	}
 	query = qualifySchemaNames(query)
 	query = resolveSearchPath(ctx, q, query)
+	query = stripPublicQualifier(query)
+	query = resolveCurrentSchema(ctx, q, query)
 	query = rewriteSQLFunctions(query)
 	cmd := leadingCommand(query)
 	if isQuery(query) {
@@ -245,6 +247,8 @@ func (s *SQLite) Describe(ctx context.Context, query string, args []core.Value) 
 func describe(ctx context.Context, q querier, query string, args []core.Value) ([]core.Column, error) {
 	query = qualifySchemaNames(query)
 	query = resolveSearchPath(ctx, q, query)
+	query = stripPublicQualifier(query)
+	query = resolveCurrentSchema(ctx, q, query)
 	query = rewriteSQLFunctions(query)
 	introSQL, ok := introspectionSQL(query)
 	if !ok {

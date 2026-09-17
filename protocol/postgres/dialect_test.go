@@ -156,19 +156,6 @@ func TestRewriteStringLiteralAware(t *testing.T) {
 		rewrite("INSERT INTO t VALUES ('a serial number')"))
 }
 
-func TestRewritePublicPrefix(t *testing.T) {
-	cases := map[string]string{
-		"SELECT * FROM public.clientes":      "SELECT * FROM clientes",
-		`SELECT * FROM "public"."clientes"`:  `SELECT * FROM "clientes"`,
-		"SELECT * FROM PUBLIC.clientes":      "SELECT * FROM clientes",
-		"SELECT * FROM t WHERE x = 'public'": "SELECT * FROM t WHERE x = 'public'", // string untouched
-		"SELECT * FROM mypublic.t":           "SELECT * FROM mypublic.t",           // not a word match
-	}
-	for in, want := range cases {
-		assert.Equalf(t, want, rewritePublicPrefix(in), "rewritePublicPrefix(%q)", in)
-	}
-}
-
 func TestRewriteMatchOperators(t *testing.T) {
 	cases := map[string]string{
 		"a ~ 'x'":                "a REGEXP 'x'",

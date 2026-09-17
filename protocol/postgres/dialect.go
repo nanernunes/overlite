@@ -13,7 +13,6 @@ func rewrite(sql string) string {
 	// Strip the pg_catalog. qualifier first, so schema-qualified type names in
 	// casts (e.g. "x::pg_catalog.regtype") reduce to a bare, castable type.
 	sql = rewritePgCatalogPrefix(sql)
-	sql = rewritePublicPrefix(sql)
 	sql = rewriteDistinctOn(sql)
 	sql = rewriteSerial(sql)
 	sql = rewriteNumericColumns(sql)
@@ -1748,16 +1747,11 @@ func rewritePgCatalogPrefix(sql string) string {
 	})
 }
 
-// rePublic matches a "public." (or "public".) schema qualifier. Clients think
-// tables live in schema public; in SQLite they live in the (unqualified) main
-// schema, so we drop the qualifier.
+// rePublic matches a "public." (or "public".) schema qualifier on a single
+// name. Stripping it across a whole statement is the engine's job, after
+// search_path resolution (see engine.stripPublicQualifier); this is for the
+// places that handle one table name or clause on their own.
 var rePublic = regexp.MustCompile(`(?i)"?\bpublic\b"?\.`)
-
-func rewritePublicPrefix(sql string) string {
-	return mapOutsideStrings(sql, func(code string) string {
-		return rePublic.ReplaceAllString(code, "")
-	})
-}
 
 // reOperatorCall matches Postgres' explicit operator syntax, e.g.
 // "OPERATOR(pg_catalog.~)", which psql emits for pattern matching.
