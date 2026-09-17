@@ -16,6 +16,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"overlite/core"
 	"overlite/engine"
 	"overlite/protocol"
 	"overlite/protocol/postgres"
@@ -37,15 +38,20 @@ func newRootCmd() *cobra.Command {
 		driver string
 		host   string
 		db     string
+		dbDir  string
 		port   int
+		maxDBs int
 	)
 	cmd := &cobra.Command{
 		Use:   "overlite [db-file]",
 		Short: "A PostgreSQL-speaking server backed by SQLite",
 		Long: "overlite speaks the PostgreSQL wire protocol on the front and " +
-			"stores everything in a single SQLite file on the back.\n\n" +
-			"The database file may be given positionally or with --db; both work:\n" +
-			"  overlite shop.db\n  overlite --db shop.db",
+			"stores everything in SQLite files on the back.\n\n" +
+			"One database, given positionally or with --db:\n" +
+			"  overlite shop.db\n  overlite --db shop.db\n\n" +
+			"Or a directory of them, one file per database, each opened on demand:\n" +
+			"  overlite --db-dir /data\n" +
+			"The client picks with the database name it connects to.",
 		Version:       version,
 		Args:          cobra.MaximumNArgs(1),
 		SilenceUsage:  true,
@@ -54,7 +60,7 @@ func newRootCmd() *cobra.Command {
 			if len(args) == 1 {
 				db = args[0] // positional wins over --db
 			}
-			return run(driver, host, db, port)
+			return run(driver, host, db, dbDir, port, maxDBs)
 		},
 	}
 	// Cobra's default is "overlite version v0.1.0"; the word adds nothing.
@@ -68,27 +74,31 @@ func newRootCmd() *cobra.Command {
 		"port to listen on (default: the protocol's, or <DRIVER>_PORT)")
 	cmd.Flags().StringVar(&db, "db", "postgres.db",
 		"path to the SQLite file (or :memory:); its name becomes the database name")
+	cmd.Flags().StringVar(&dbDir, "db-dir", "",
+		"serve a directory of databases: <name>.db per database, opened on demand")
+	cmd.Flags().IntVar(&maxDBs, "max-open-databases", engine.DefaultMaxOpenDatabases,
+		"with --db-dir, how many databases to keep open at once")
 	return cmd
 }
 
-func run(driver, host, db string, port int) error {
+func run(driver, host, db, dbDir string, port, maxDBs int) error {
 	proto, err := selectDriver(driver)
 	if err != nil {
 		return err
 	}
 
-	eng, err := engine.Open(db)
+	cluster, describe, err := openCluster(db, dbDir, maxDBs)
 	if err != nil {
-		return fmt.Errorf("open engine %s: %w", db, describeDBPath(db, err))
+		return err
 	}
-	defer eng.Close()
+	defer cluster.Close()
 
 	// --port wins; otherwise the driver's default, overridable via
 	// <DRIVER>_PORT (e.g. POSTGRES_PORT).
 	if port == 0 {
 		port = envInt(strings.ToUpper(driver)+"_PORT", proto.DefaultPort())
 	}
-	srv, err := server.New(net.JoinHostPort(host, strconv.Itoa(port)), proto, eng)
+	srv, err := server.New(net.JoinHostPort(host, strconv.Itoa(port)), proto, cluster)
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
@@ -96,8 +106,8 @@ func run(driver, host, db string, port int) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	log.Printf("overlite: %s protocol on %s -> sqlite %s (db=%s user=%s auth=%s tls=%s)",
-		driver, srv.Addr(), db, dbName(db), currentUser(), authMode(), tlsMode())
+	log.Printf("overlite: %s protocol on %s -> %s (user=%s auth=%s tls=%s)",
+		driver, srv.Addr(), describe, currentUser(), authMode(), tlsMode())
 	return srv.Serve(ctx)
 }
 
@@ -188,4 +198,25 @@ func describeDBPath(db string, err error) error {
 		return fmt.Errorf("the directory %s does not exist: %w", dir, err)
 	}
 	return err
+}
+
+// openCluster builds the set of databases to serve: one file, or a directory
+// of them. It returns a line describing the choice for the startup log.
+func openCluster(db, dbDir string, maxDBs int) (core.Cluster, string, error) {
+	if dbDir != "" {
+		dir, err := engine.OpenDir(dbDir, maxDBs)
+		if err != nil {
+			return nil, "", err
+		}
+		names, _ := dir.Databases()
+		return dir, fmt.Sprintf("sqlite dir %s (%d databases, %d kept open)",
+			dbDir, len(names), maxDBs), nil
+	}
+
+	eng, err := engine.Open(db)
+	if err != nil {
+		return nil, "", fmt.Errorf("open engine %s: %w", db, describeDBPath(db, err))
+	}
+	name := dbName(db)
+	return engine.Single(name, eng), fmt.Sprintf("sqlite %s (db=%s)", db, name), nil
 }

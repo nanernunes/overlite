@@ -14,12 +14,12 @@ import (
 	"overlite/protocol"
 )
 
-// Server binds one Protocol to one Engine on a listening address. A single
-// Server process owns the SQLite file; every client multiplexes through it.
+// Server binds one Protocol to one Cluster on a listening address. A single
+// Server process owns the SQLite files; every client multiplexes through it.
 type Server struct {
-	proto  protocol.Protocol
-	engine core.Engine
-	ln     net.Listener
+	proto   protocol.Protocol
+	cluster core.Cluster
+	ln      net.Listener
 
 	mu    sync.Mutex
 	conns map[net.Conn]struct{}
@@ -27,16 +27,16 @@ type Server struct {
 
 // New starts listening on addr (e.g. "127.0.0.1:5432", or ":0" for a random
 // free port, useful in tests). Call Serve to accept connections.
-func New(addr string, proto protocol.Protocol, engine core.Engine) (*Server, error) {
+func New(addr string, proto protocol.Protocol, cluster core.Cluster) (*Server, error) {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, err
 	}
 	return &Server{
-		proto:  proto,
-		engine: engine,
-		ln:     ln,
-		conns:  make(map[net.Conn]struct{}),
+		proto:   proto,
+		cluster: cluster,
+		ln:      ln,
+		conns:   make(map[net.Conn]struct{}),
 	}, nil
 }
 
@@ -75,7 +75,7 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 				s.proto.Name(), conn.RemoteAddr(), r, debug.Stack())
 		}
 	}()
-	if err := s.proto.Serve(ctx, conn, s.engine); err != nil {
+	if err := s.proto.Serve(ctx, conn, s.cluster); err != nil {
 		log.Printf("%s: connection %s: %v", s.proto.Name(), conn.RemoteAddr(), err)
 	}
 }

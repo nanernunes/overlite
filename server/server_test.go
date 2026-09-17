@@ -17,7 +17,7 @@ type panicProto struct{ seen int }
 func (p *panicProto) Name() string     { return "panic-test" }
 func (p *panicProto) DefaultPort() int { return 0 }
 
-func (p *panicProto) Serve(_ context.Context, conn net.Conn, _ core.Engine) error {
+func (p *panicProto) Serve(_ context.Context, conn net.Conn, _ core.Cluster) error {
 	p.seen++
 	if p.seen == 1 {
 		panic("boom")

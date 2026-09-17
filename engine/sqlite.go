@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"time"
 
 	"overlite/core"
 
@@ -65,13 +66,28 @@ func Open(path string) (*SQLite, error) {
 }
 
 // Session pins a dedicated connection for one client. Implements core.Engine.
+//
+// Past maxConnections it refuses rather than waiting: database/sql blocks on a
+// full pool until its context ends, so a client over the limit used to hang
+// with no answer instead of being told the server was full.
 func (s *SQLite) Session(ctx context.Context) (core.Session, error) {
+	ctx, cancel := context.WithTimeout(ctx, connWaitTimeout)
+	defer cancel()
+
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return nil, fmt.Errorf("sorry, too many clients already (max %d)", maxConnections)
+		}
 		return nil, err
 	}
 	return &sqliteSession{conn: conn, mainPath: s.mainPath, state: s.state}, nil
 }
+
+// connWaitTimeout is how long a new client waits for a free connection before
+// being refused. It is short enough to be an answer rather than a hang, and
+// long enough to ride out a burst of connections closing.
+const connWaitTimeout = 3 * time.Second
 
 // sqliteSession is one client's dedicated connection.
 type sqliteSession struct {

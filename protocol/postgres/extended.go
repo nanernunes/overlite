@@ -27,6 +27,12 @@ type session struct {
 	// rest of the cycle is skipped until the next Sync, per the protocol.
 	failed bool
 
+	// cluster is the set of databases this server holds, and database is the
+	// one this connection is on. CREATE/DROP DATABASE and pg_database read
+	// them; nothing else crosses out of the connection's own database.
+	cluster  core.Cluster
+	database string
+
 	// tx is the current transaction (nil = autocommit). txFailed marks it as
 	// aborted: further statements are rejected until COMMIT/ROLLBACK.
 	tx       core.Tx
@@ -79,6 +85,8 @@ type prepared struct {
 	// blank marks a statement with nothing executable in it (a lone comment),
 	// answered with EmptyQueryResponse at Execute.
 	blank bool
+	// databaseDDL holds a raw CREATE/DROP DATABASE, applied at Execute.
+	databaseDDL string
 	// util is set for intercepted statements (SET/SHOW/...) that bypass the
 	// engine and return a synthetic result.
 	util *core.ResultSet
@@ -374,6 +382,10 @@ func (s *session) handleParse(body []byte) error {
 		s.prepared[name] = &prepared{listenNotify: raw}
 		return s.c.send(msgParseComplete, nil)
 	}
+	if isDatabaseDDL(raw) {
+		s.prepared[name] = &prepared{databaseDDL: raw}
+		return s.c.send(msgParseComplete, nil)
+	}
 	if isComment(raw) {
 		s.prepared[name] = &prepared{comment: raw}
 		return s.c.send(msgParseComplete, nil)
@@ -472,7 +484,7 @@ func (s *session) handleDescribe(body []byte) error {
 		if prep == nil {
 			return s.protoError("26000", "unknown prepared statement "+quoteName(name))
 		}
-		if prep.blank || prep.util != nil || prep.txControl != "" || prep.seqDDL != "" || prep.typeDDL != "" || prep.setRole != "" || prep.grant != "" || prep.rlsDDL != "" || prep.alterDDL != "" || prep.listenNotify != "" || prep.comment != "" || prep.searchPathStmt != "" {
+		if prep.blank || prep.databaseDDL != "" || prep.util != nil || prep.txControl != "" || prep.seqDDL != "" || prep.typeDDL != "" || prep.setRole != "" || prep.grant != "" || prep.rlsDDL != "" || prep.alterDDL != "" || prep.listenNotify != "" || prep.comment != "" || prep.searchPathStmt != "" {
 			if err := s.c.sendParameterDescription(0); err != nil {
 				return err
 			}
@@ -490,7 +502,7 @@ func (s *session) handleDescribe(body []byte) error {
 			return s.protoError("34000", "unknown portal "+quoteName(name))
 		}
 		prep = pt.prep
-		if prep.blank || prep.util != nil || prep.txControl != "" || prep.seqDDL != "" || prep.typeDDL != "" || prep.setRole != "" || prep.grant != "" || prep.rlsDDL != "" || prep.alterDDL != "" || prep.listenNotify != "" || prep.comment != "" || prep.searchPathStmt != "" {
+		if prep.blank || prep.databaseDDL != "" || prep.util != nil || prep.txControl != "" || prep.seqDDL != "" || prep.typeDDL != "" || prep.setRole != "" || prep.grant != "" || prep.rlsDDL != "" || prep.alterDDL != "" || prep.listenNotify != "" || prep.comment != "" || prep.searchPathStmt != "" {
 			return s.sendUtilDescribe(prep.util)
 		}
 		args = pt.params
@@ -534,6 +546,17 @@ func (s *session) handleExecute(body []byte) error {
 
 	if pt.prep.blank {
 		return s.c.send(msgEmptyQuery, nil)
+	}
+
+	if pt.prep.databaseDDL != "" {
+		tag, _, err := s.tryDatabaseDDL(pt.prep.databaseDDL)
+		if err != nil {
+			return s.protoError("42P04", err.Error())
+		}
+		if err := s.refreshDatabaseList(); err != nil {
+			return err
+		}
+		return s.c.sendCommandComplete(tag)
 	}
 
 	if kind := pt.prep.txControl; kind != "" {

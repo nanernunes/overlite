@@ -50,7 +50,7 @@ func TestCommentOnlyStatementExtendedProtocol(t *testing.T) {
 func TestDatabaseSQLPing(t *testing.T) {
 	addr := startServer(t)
 
-	db, err := sql.Open("pgx", fmt.Sprintf("postgres://overlite@%s/main?sslmode=disable", addr))
+	db, err := sql.Open("pgx", fmt.Sprintf("postgres://overlite@%s/test?sslmode=disable", addr))
 	require.NoError(t, err)
 	defer db.Close()
 

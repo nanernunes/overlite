@@ -23,7 +23,7 @@ func startServer(t *testing.T) string {
 	eng, err := engine.Open(t.TempDir() + "/test.db")
 	require.NoError(t, err)
 
-	srv, err := server.New("127.0.0.1:0", postgres.New(), eng)
+	srv, err := server.New("127.0.0.1:0", postgres.New(), engine.Single("test", eng))
 	if err != nil {
 		eng.Close()
 		require.NoError(t, err)
@@ -45,7 +45,7 @@ func startServer(t *testing.T) string {
 func connect(t *testing.T, addr string) *pgx.Conn {
 	t.Helper()
 
-	cfg, err := pgx.ParseConfig(fmt.Sprintf("postgres://overlite@%s/main?sslmode=disable", addr))
+	cfg, err := pgx.ParseConfig(fmt.Sprintf("postgres://overlite@%s/test?sslmode=disable", addr))
 	require.NoError(t, err)
 	cfg.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 

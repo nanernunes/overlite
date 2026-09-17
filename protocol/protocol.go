@@ -25,7 +25,10 @@ type Protocol interface {
 	DefaultPort() int
 
 	// Serve owns conn until the client disconnects or an unrecoverable error
-	// occurs. The caller closes conn afterwards. Implementations must not
-	// assume anything about the engine beyond the core.Engine contract.
-	Serve(ctx context.Context, conn net.Conn, engine core.Engine) error
+	// occurs. The caller closes conn afterwards.
+	//
+	// The cluster is the set of databases this server holds; the client names
+	// the one it wants when it connects, and stays on it for the life of the
+	// connection.
+	Serve(ctx context.Context, conn net.Conn, cluster core.Cluster) error
 }

@@ -74,7 +74,7 @@ func (p *Protocol) Name() string { return "postgres" }
 func (p *Protocol) DefaultPort() int { return 5432 }
 
 // Serve implements protocol.Protocol.
-func (p *Protocol) Serve(ctx context.Context, conn net.Conn, engine core.Engine) error {
+func (p *Protocol) Serve(ctx context.Context, conn net.Conn, cluster core.Cluster) error {
 	c := newWireConn(conn)
 
 	params, cancelReq, err := c.readStartup(p.tls)
@@ -87,9 +87,21 @@ func (p *Protocol) Serve(ctx context.Context, conn net.Conn, engine core.Engine)
 		return nil
 	}
 
+	// The client names its database when it connects and stays on it. Asking
+	// for one this server does not hold is an error, not a silent landing on
+	// whichever database happens to be here.
+	database := params["database"]
+	eng, err := cluster.Engine(ctx, database)
+	if err != nil {
+		_ = c.sendFatal("3D000", err.Error())
+		_ = c.flush()
+		return err
+	}
+	defer cluster.Release(database)
+
 	// A dedicated engine connection per client, opened before auth so we can look
 	// up the connecting role's password.
-	db, err := engine.Session(ctx)
+	db, err := eng.Session(ctx)
 	if err != nil {
 		_ = c.sendFatal("53300", "too many connections: "+err.Error())
 		_ = c.flush()
@@ -113,6 +125,11 @@ func (p *Protocol) Serve(ctx context.Context, conn net.Conn, engine core.Engine)
 
 	s := newSession(ctx, c, db, params["user"], pid)
 	s.canceler = cl
+	s.cluster = cluster
+	s.database = database
+	// The engine's pg_database knows only its own file; the cluster knows the
+	// rest, so the view is replaced once the connection is up.
+	_ = s.refreshDatabaseList()
 	// Honor a search_path given at connection time (startup parameter or
 	// options=-c search_path=...), as drivers and PGOPTIONS do.
 	if sp := startupSearchPath(params); sp != nil {
@@ -521,6 +538,19 @@ func (s *session) handleSimpleQuery(body []byte) error {
 			s.txFailed = true
 		}
 		return s.c.sendError("42501", err.Error())
+	}
+
+	if tag, handled, err := s.tryDatabaseDDL(sql); handled {
+		if err != nil {
+			if s.tx != nil {
+				s.txFailed = true
+			}
+			return s.c.sendError("42P04", err.Error())
+		}
+		if err := s.refreshDatabaseList(); err != nil {
+			return err
+		}
+		return s.c.sendCommandComplete(tag)
 	}
 
 	// Record/strip nextval column defaults (CREATE TABLE) or inject them (INSERT).

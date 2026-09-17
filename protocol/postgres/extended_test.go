@@ -16,7 +16,7 @@ import (
 func connectExtended(t *testing.T, addr string) *pgx.Conn {
 	t.Helper()
 
-	cfg, err := pgx.ParseConfig(fmt.Sprintf("postgres://overlite@%s/main?sslmode=disable", addr))
+	cfg, err := pgx.ParseConfig(fmt.Sprintf("postgres://overlite@%s/test?sslmode=disable", addr))
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
