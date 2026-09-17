@@ -133,9 +133,9 @@ const enumTypesTable = "_overlite_enum_types"
 
 // refreshEnumNamesFrom reloads the registry format_type() reads, from the
 // connection that just changed it.
-func refreshEnumNamesFrom(ctx context.Context, c *sql.Conn) {
+func refreshEnumNamesFrom(ctx context.Context, st *dbState, c *sql.Conn) {
 	rows, err := c.QueryContext(ctx,
-		"SELECT (rowid + "+strconv.Itoa(enumOIDBase)+") || ':' || typname FROM "+enumTypesTable)
+		"SELECT (rowid + "+strconv.FormatInt(st.enumBase(), 10)+") || ':' || typname FROM "+enumTypesTable)
 	if err != nil {
 		return
 	}

@@ -715,6 +715,9 @@ func asInt64(v driver.Value) int64 {
 }
 
 // staticCatalogViews are schema-independent; created on every connection.
+// @ENUMBASE@ is filled in per database: an enum type's oid is its rowid plus a
+// base, and the registry format_type() reads is shared by the whole process, so
+// two databases numbering from the same rowid would render each other's names.
 // The schema-spanning views (pg_namespace/pg_class/pg_attribute/pg_index/
 // pg_constraint/information_schema.*) are generated in catalog_views.go.
 var staticCatalogViews = []string{
@@ -741,7 +744,7 @@ var staticCatalogViews = []string{
 	 UNION ALL SELECT 114,  'json',      11, 10, 'b', 'U', -1, 0, 0, 0, 199,  0, 0, -1, 0, 0, NULL, ','
 	 UNION ALL SELECT 3802, 'jsonb',     11, 10, 'b', 'U', -1, 0, 0, 0, 3807, 0, 0, -1, 0, 0, NULL, ','
 	 UNION ALL SELECT 2950, 'uuid',      11, 10, 'b', 'U', 16, 0, 0, 0, 2951, 0, 0, -1, 0, 0, NULL, ','
-	 UNION ALL SELECT CAST(rowid + 90000000 AS INTEGER), typname, 2200, 10, 'e', 'E', 4, 1, 0, 0, 0, 0, 0, -1, 0, 0, NULL, ','
+	 UNION ALL SELECT CAST(rowid + @ENUMBASE@ AS INTEGER), typname, 2200, 10, 'e', 'E', 4, 1, 0, 0, 0, 0, 0, -1, 0, 0, NULL, ','
 	           FROM _overlite_enum_types
 	 UNION ALL SELECT CAST(rowid + 95000000 AS INTEGER), typname, 2200, 10, 'c', 'C', -1, 0, 0, 0, 0, 0, 0, -1, 0, 0, NULL, ','
 	           FROM _overlite_composite_types
@@ -749,7 +752,7 @@ var staticCatalogViews = []string{
 
 	`CREATE TEMP VIEW IF NOT EXISTS pg_enum AS
 	 SELECT CAST(e.rowid AS INTEGER) AS oid,
-	        CAST((SELECT t.rowid + 90000000 FROM _overlite_enum_types t WHERE t.typname = e.typname) AS INTEGER) AS enumtypid,
+	        CAST((SELECT t.rowid + @ENUMBASE@ FROM _overlite_enum_types t WHERE t.typname = e.typname) AS INTEGER) AS enumtypid,
 	        CAST(e.sortorder AS REAL) AS enumsortorder, e.label AS enumlabel
 	 FROM _overlite_enums e`,
 

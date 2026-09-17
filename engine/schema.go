@@ -254,7 +254,8 @@ func setupConnection(ctx context.Context, exec func(string) error, query func(st
 		}
 	}
 	// Refresh the global enum oid->name registry that format_type() reads.
-	if names, err := query("SELECT (rowid + 90000000) || ':' || typname FROM _overlite_enum_types"); err == nil {
+	if names, err := query(fmt.Sprintf(
+		"SELECT (rowid + %d) || ':' || typname FROM _overlite_enum_types", st.enumBase())); err == nil {
 		refreshEnumNames(names)
 	}
 	// Refresh the LANGUAGE sql function cache (columns joined by char(30)).
@@ -272,13 +273,13 @@ func setupConnection(ctx context.Context, exec func(string) error, query func(st
 
 	refs := schemaRefs(schemas)
 	for _, stmt := range staticCatalogViews {
-		if err := exec(withTableOID(stmt)); err != nil {
+		if err := exec(withTableOID(st.fillEnumBase(stmt))); err != nil {
 			return err
 		}
 	}
 	// Meta + schema-spanning views are rebuilt (DROP + CREATE) so they pick up
 	// the current role/database name and schema set.
-	rebuilt := append(metaCatalogViews(st.dbName()), dynamicCatalogViews(refs, st.dbName())...)
+	rebuilt := append(metaCatalogViews(st.dbName()), dynamicCatalogViews(refs, st.dbName(), st.enumBase())...)
 	for _, stmt := range rebuilt {
 		if err := exec(dropViewOf(stmt)); err != nil {
 			return err

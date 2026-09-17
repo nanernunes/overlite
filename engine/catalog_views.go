@@ -10,7 +10,7 @@ import (
 // scope), @MASTER@ = the schema's table source (an sqlite_master or a filtered
 // view of it), @NS@ = namespace oid, @OFF@ = oid offset (keeps ids distinct
 // across schemas), @PG@ = the Postgres schema name.
-func frag(tmpl string, r schemaRef, dbName string) string {
+func frag(tmpl string, r schemaRef, dbName string, enumBase int64) string {
 	return strings.NewReplacer(
 		"@DB@", r.DB,
 		"@MASTER@", r.master(),
@@ -22,6 +22,7 @@ func frag(tmpl string, r schemaRef, dbName string) string {
 		// public and for multi-file schemas.
 		"@PLEN@", strconv.Itoa(len(r.Prefix)+1),
 		"@ROLE@", sqlQuote(catalogRole),
+		"@ENUMBASE@", strconv.FormatInt(enumBase, 10),
 		// The catalog columns must name the database the client sees from
 		// current_database(); reporting SQLite's internal "main" made every
 		// information_schema query filtered by catalog return nothing, which
@@ -30,10 +31,10 @@ func frag(tmpl string, r schemaRef, dbName string) string {
 	).Replace(tmpl)
 }
 
-func union(name string, refs []schemaRef, tmpl, dbName string) string {
+func union(name string, refs []schemaRef, tmpl, dbName string, enumBase int64) string {
 	parts := make([]string, len(refs))
 	for i, r := range refs {
-		parts[i] = frag(tmpl, r, dbName)
+		parts[i] = frag(tmpl, r, dbName, enumBase)
 	}
 	return "CREATE TEMP VIEW " + name + " AS\n" + strings.Join(parts, "\nUNION ALL\n")
 }
@@ -54,10 +55,10 @@ func withTableOID(stmt string) string {
 
 // unionWrap wraps union() so the view exposes extraCols (constant columns
 // pg_dump selects that aren't worth threading through every UNION branch).
-func unionWrap(name, extraCols string, refs []schemaRef, tmpl, dbName string) string {
+func unionWrap(name, extraCols string, refs []schemaRef, tmpl, dbName string, enumBase int64) string {
 	parts := make([]string, len(refs))
 	for i, r := range refs {
-		parts[i] = frag(tmpl, r, dbName)
+		parts[i] = frag(tmpl, r, dbName, enumBase)
 	}
 	return "CREATE TEMP VIEW " + name + " AS SELECT _u.*, " + extraCols +
 		" FROM (\n" + strings.Join(parts, "\nUNION ALL\n") + "\n) _u"
@@ -65,13 +66,13 @@ func unionWrap(name, extraCols string, refs []schemaRef, tmpl, dbName string) st
 
 // unionOID is unionWrap with just a constant tableoid column (the catalog's own
 // oid in pg_class), a row's originating-catalog discriminator for pg_dump.
-func unionOID(name string, tableOID int, refs []schemaRef, tmpl, dbName string) string {
-	return unionWrap(name, strconv.Itoa(tableOID)+" AS tableoid", refs, tmpl, dbName)
+func unionOID(name string, tableOID int, refs []schemaRef, tmpl, dbName string, enumBase int64) string {
+	return unionWrap(name, strconv.Itoa(tableOID)+" AS tableoid", refs, tmpl, dbName, enumBase)
 }
 
 // dynamicCatalogViews returns the catalog views that span every attached
 // schema. Rebuilt whenever the set of schemas changes.
-func dynamicCatalogViews(refs []schemaRef, dbName string) []string {
+func dynamicCatalogViews(refs []schemaRef, dbName string, enumBase int64) []string {
 	// pg_namespace: fixed system schemas plus one row per real schema.
 	ns := "CREATE TEMP VIEW pg_namespace AS" +
 		" SELECT 11 AS oid,'pg_catalog' AS nspname,10 AS nspowner, 2615 AS tableoid, NULL AS nspacl" +
@@ -82,22 +83,22 @@ func dynamicCatalogViews(refs []schemaRef, dbName string) []string {
 
 	return []string{
 		ns,
-		pgClassView(refs, dbName),
-		unionOID("pg_attribute", 1249, refs, pgAttributeTmpl, dbName),
-		unionOID("pg_attrdef", 2604, refs, pgAttrdefTmpl, dbName),
-		unionWrap("pg_index", "2610 AS tableoid, 0 AS indnullsnotdistinct", refs, pgIndexTmpl, dbName),
-		unionWrap("pg_constraint", "2606 AS tableoid, NULL AS conparentid2, 0 AS conperiod", refs, pgConstraintTmpl, dbName),
-		unionWrap("pg_trigger", "2620 AS tableoid, 0 AS tgparentid", refs, pgTriggerTmpl, dbName),
-		union(`"information_schema.tables"`, refs, infoTablesTmpl, dbName),
-		union(`"information_schema.columns"`, refs, infoColumnsTmpl, dbName),
-		union(`"information_schema.table_constraints"`, refs, infoTableConstraintsTmpl, dbName),
-		union(`"information_schema.key_column_usage"`, refs, infoKeyColumnUsageTmpl, dbName),
-		union(`"information_schema.referential_constraints"`, refs, infoReferentialConstraintsTmpl, dbName),
-		union(`"information_schema.constraint_column_usage"`, refs, infoConstraintColumnUsageTmpl, dbName),
-		union(`"information_schema.views"`, refs, infoViewsTmpl, dbName),
-		union("pg_tables", refs, pgTablesTmpl, dbName),
-		union("pg_indexes", refs, pgIndexesTmpl, dbName),
-		union("pg_views", refs, pgViewsTmpl, dbName),
+		pgClassView(refs, dbName, enumBase),
+		unionOID("pg_attribute", 1249, refs, pgAttributeTmpl, dbName, enumBase),
+		unionOID("pg_attrdef", 2604, refs, pgAttrdefTmpl, dbName, enumBase),
+		unionWrap("pg_index", "2610 AS tableoid, 0 AS indnullsnotdistinct", refs, pgIndexTmpl, dbName, enumBase),
+		unionWrap("pg_constraint", "2606 AS tableoid, NULL AS conparentid2, 0 AS conperiod", refs, pgConstraintTmpl, dbName, enumBase),
+		unionWrap("pg_trigger", "2620 AS tableoid, 0 AS tgparentid", refs, pgTriggerTmpl, dbName, enumBase),
+		union(`"information_schema.tables"`, refs, infoTablesTmpl, dbName, enumBase),
+		union(`"information_schema.columns"`, refs, infoColumnsTmpl, dbName, enumBase),
+		union(`"information_schema.table_constraints"`, refs, infoTableConstraintsTmpl, dbName, enumBase),
+		union(`"information_schema.key_column_usage"`, refs, infoKeyColumnUsageTmpl, dbName, enumBase),
+		union(`"information_schema.referential_constraints"`, refs, infoReferentialConstraintsTmpl, dbName, enumBase),
+		union(`"information_schema.constraint_column_usage"`, refs, infoConstraintColumnUsageTmpl, dbName, enumBase),
+		union(`"information_schema.views"`, refs, infoViewsTmpl, dbName, enumBase),
+		union("pg_tables", refs, pgTablesTmpl, dbName, enumBase),
+		union("pg_indexes", refs, pgIndexesTmpl, dbName, enumBase),
+		union("pg_views", refs, pgViewsTmpl, dbName, enumBase),
 		infoSchemataView(refs, dbName),
 		infoSequencesView(dbName),
 		infoCheckConstraintsView(dbName),
@@ -152,17 +153,17 @@ WHERE trg.type = 'trigger' AND trg.name NOT LIKE 'sqlite_%' AND trg.name NOT GLO
 
 // pgClassView is pg_class over every schema, plus the sequences (relkind 'S')
 // that live in the main/public database, so \ds and \d <seq> find them.
-func pgClassView(refs []schemaRef, dbName string) string {
+func pgClassView(refs []schemaRef, dbName string, enumBase int64) string {
 	parts := make([]string, 0, len(refs)+1)
 	for _, r := range refs {
-		parts = append(parts, frag(pgClassTmpl, r, dbName))
+		parts = append(parts, frag(pgClassTmpl, r, dbName, enumBase))
 	}
 	for _, r := range refs {
-		parts = append(parts, frag(pgUniqueIndexClassTmpl, r, dbName))
+		parts = append(parts, frag(pgUniqueIndexClassTmpl, r, dbName, enumBase))
 	}
 	for _, r := range refs {
 		if r.PgName == "public" {
-			parts = append(parts, frag(pgSequenceClassTmpl, r, dbName))
+			parts = append(parts, frag(pgSequenceClassTmpl, r, dbName, enumBase))
 		}
 	}
 	return "CREATE TEMP VIEW pg_class AS SELECT _c.*, 1259 AS tableoid," +
@@ -220,7 +221,7 @@ WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%' AND tbl.name NOT GLOB '_
 
 const pgAttributeTmpl = `SELECT CAST(m.rowid + @OFF@ AS INTEGER) AS attrelid, ti.name AS attname,
  COALESCE(
-  (SELECT t.rowid + 90000000 FROM _overlite_enum_types t
+  (SELECT t.rowid + @ENUMBASE@ FROM _overlite_enum_types t
     WHERE (SELECT group_concat(label) FROM (SELECT label FROM _overlite_enums
              WHERE typname = t.typname ORDER BY sortorder))
           = overlite_enum_labels((SELECT sql FROM @MASTER@ WHERE name = m.name), ti.name)),

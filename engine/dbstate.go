@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"strconv"
+	"strings"
 	"sync"
 )
 
@@ -63,6 +65,21 @@ func (s *dbState) schemaList() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.schemas
+}
+
+// enumBase is where this database's enum type oids start. format_type() reads
+// a registry shared by the whole process, so the bases have to be far enough
+// apart that two databases never produce the same oid.
+func (s *dbState) enumBase() int64 {
+	if s == nil {
+		return enumOIDBase
+	}
+	return enumOIDBase + s.oidBand
+}
+
+// fillEnumBase substitutes this database's enum oid base into a catalog view.
+func (s *dbState) fillEnumBase(stmt string) string {
+	return strings.ReplaceAll(stmt, "@ENUMBASE@", strconv.FormatInt(s.enumBase(), 10))
 }
 
 // dbName is the name current_database() answers for this database.

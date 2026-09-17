@@ -2,8 +2,11 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
+
+	"overlite/core"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -83,4 +86,56 @@ func TestTwoDatabasesInOneProcess(t *testing.T) {
 	}
 	assert.Equal(t, "shop", catalog(shop))
 	assert.Equal(t, "blog", catalog(blog))
+}
+
+// An enum type's oid is its rowid plus a base, and format_type() renders a name
+// from a registry shared by the whole process. Two databases numbering from the
+// same base therefore produced the same oid for different types, and each
+// rendered whichever name was stored last — the other database's.
+func TestEnumsDoNotCollideAcrossDatabases(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+
+	open := func(name string) core.Session {
+		eng, err := Open(filepath.Join(dir, name+".db"))
+		require.NoError(t, err)
+		t.Cleanup(func() { eng.Close() })
+		// A client session, which is the path that keeps the registry current.
+		sess, err := eng.Session(ctx)
+		require.NoError(t, err)
+		t.Cleanup(func() { sess.Close() })
+		return sess
+	}
+
+	shop, blog := open("shop"), open("blog")
+
+	exec := func(s core.Session, sql string) {
+		_, err := s.Execute(ctx, sql, nil)
+		require.NoErrorf(t, err, "exec %s", sql)
+	}
+	// The first enum in each database, so both are rowid 1.
+	exec(shop, `INSERT INTO _overlite_enum_types (typname) VALUES ('order_status')`)
+	exec(blog, `INSERT INTO _overlite_enum_types (typname) VALUES ('post_state')`)
+
+	// Their oids differ, which is what keeps the shared registry honest.
+	oid := func(s core.Session, typname string) int64 {
+		rs, err := s.Execute(ctx, `SELECT oid FROM pg_type WHERE typname = `+sqlQuote(typname), nil)
+		require.NoError(t, err)
+		require.Len(t, rs.Rows, 1)
+		return asInt64(rs.Rows[0][0])
+	}
+	shopOID, blogOID := oid(shop, "order_status"), oid(blog, "post_state")
+	assert.NotEqual(t, shopOID, blogOID, "two databases gave the same oid to different enum types")
+
+	// And each renders its own name, not the other's.
+	name := func(s core.Session, o int64) string {
+		rs, err := s.Execute(ctx, fmt.Sprintf(`SELECT format_type(%d, NULL)`, o), nil)
+		require.NoError(t, err)
+		return asString(rs.Rows[0][0])
+	}
+	assert.Equal(t, "order_status", name(shop, shopOID))
+	assert.Equal(t, "post_state", name(blog, blogOID))
+
+	// A connection that arrives later loads the registry on connect and agrees.
+	assert.Equal(t, "order_status", name(open("shop"), shopOID))
 }

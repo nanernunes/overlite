@@ -102,7 +102,7 @@ func (ss *sqliteSession) Execute(ctx context.Context, sql string, args []core.Va
 	// opens. Without this, a type created later in the same session renders as
 	// its storage type (text) until the client reconnects.
 	if err == nil && strings.Contains(sql, enumTypesTable) {
-		refreshEnumNamesFrom(ctx, ss.conn)
+		refreshEnumNamesFrom(ctx, ss.state, ss.conn)
 	}
 	return rs, err
 }
