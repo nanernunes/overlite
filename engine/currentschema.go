@@ -16,15 +16,15 @@ import (
 
 // resolveCurrentSchema replaces bare current_schema()/current_schemas() calls
 // with the value this session's search_path gives them.
-func resolveCurrentSchema(ctx context.Context, q querier, query string) string {
+func resolveCurrentSchema(ctx context.Context, st *dbState, query string) string {
 	lower := strings.ToLower(query)
 	if !strings.Contains(lower, "current_schema") {
 		return query
 	}
-	schema := currentSchema(ctx, q)
+	schema := currentSchema(ctx, st)
 
 	out := replaceCallOutsideStrings(query, "current_schemas", func(args string) string {
-		return sqlQuote(currentSchemas(ctx, q, strings.Contains(strings.ToLower(args), "true")))
+		return sqlQuote(currentSchemas(ctx, st, strings.Contains(strings.ToLower(args), "true")))
 	})
 	return replaceCallOutsideStrings(out, "current_schema", func(string) string {
 		if schema == "" {
@@ -37,8 +37,8 @@ func resolveCurrentSchema(ctx context.Context, q querier, query string) string {
 // currentSchema is the first schema in the search_path that exists, as
 // Postgres defines it. With no path, or one naming nothing that exists, the
 // answer is public.
-func currentSchema(ctx context.Context, q querier) string {
-	for _, s := range usableSearchPath(searchPathFrom(ctx)) {
+func currentSchema(ctx context.Context, st *dbState) string {
+	for _, s := range usableSearchPath(st, searchPathFrom(ctx)) {
 		return s
 	}
 	return "public"
@@ -46,12 +46,12 @@ func currentSchema(ctx context.Context, q querier) string {
 
 // currentSchemas renders the path as a Postgres array literal, optionally with
 // the implicit pg_catalog in front.
-func currentSchemas(ctx context.Context, q querier, includeImplicit bool) string {
+func currentSchemas(ctx context.Context, st *dbState, includeImplicit bool) string {
 	var names []string
 	if includeImplicit {
 		names = append(names, "pg_catalog")
 	}
-	names = append(names, usableSearchPath(searchPathFrom(ctx))...)
+	names = append(names, usableSearchPath(st, searchPathFrom(ctx))...)
 	names = append(names, "public")
 	return "{" + strings.Join(names, ",") + "}"
 }

@@ -3,7 +3,6 @@ package engine
 import (
 	"regexp"
 	"strings"
-	"sync"
 )
 
 // In single-file mode a schema-qualified name like `vendas.pedidos` must reach
@@ -12,34 +11,18 @@ import (
 // `schema.table` qualifier from an `alias.column` one: only a qualifier whose
 // first part is a *registered schema* is rewritten.
 //
-// The registered-schema set is cached (refreshed by setupConnection and after
-// CREATE/DROP SCHEMA) so the rewrite doesn't hit the database per statement.
-
-var (
-	schemaCacheMu    sync.RWMutex
-	schemaCacheNames []string
-)
-
-func setSchemaCache(names []string) {
-	schemaCacheMu.Lock()
-	schemaCacheNames = append(schemaCacheNames[:0:0], names...)
-	schemaCacheMu.Unlock()
-}
-
-func cachedSchemas() []string {
-	schemaCacheMu.RLock()
-	defer schemaCacheMu.RUnlock()
-	return schemaCacheNames
-}
+// The registered-schema set is held per database (refreshed by setupConnection
+// and after CREATE/DROP SCHEMA) so the rewrite doesn't hit the database per
+// statement.
 
 // qualifySchemaNames rewrites `<schema>.<name>` → `"<schema>.<name>"` for every
 // registered schema, outside string/identifier literals. A no-op when no schema
 // is registered.
-func qualifySchemaNames(query string) string {
+func qualifySchemaNames(st *dbState, query string) string {
 	if !strings.Contains(query, ".") {
 		return query
 	}
-	schemas := cachedSchemas()
+	schemas := st.schemaList()
 	for _, s := range schemas {
 		query = qualifyOneSchema(query, s)
 	}

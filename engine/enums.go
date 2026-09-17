@@ -49,6 +49,11 @@ func lookupEnumName(oid int64) (string, bool) {
 // the built-in pg_type oids or the sequence/pg_class ranges.
 const enumOIDBase = 90000000
 
+// enumOIDBandWidth is how many oids each database gets for its enum types. The
+// registry format_type() reads is process-wide, so two databases numbering
+// their types from the same rowid would otherwise render each other's names.
+const enumOIDBandWidth = 1000000
+
 const enumTypesTableDDL = `CREATE TABLE IF NOT EXISTS _overlite_enum_types (
   typname TEXT PRIMARY KEY COLLATE NOCASE
 )`

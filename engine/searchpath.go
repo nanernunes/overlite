@@ -21,12 +21,12 @@ func searchPathFrom(ctx context.Context) []string {
 
 // usableSearchPath returns the registered, non-public schemas named in the
 // session path, in path order.
-func usableSearchPath(sp []string) []string {
+func usableSearchPath(st *dbState, sp []string) []string {
 	if len(sp) == 0 {
 		return nil
 	}
 	reg := map[string]bool{}
-	for _, s := range cachedSchemas() {
+	for _, s := range st.schemaList() {
 		reg[strings.ToLower(s)] = true
 	}
 	var out []string
@@ -42,8 +42,8 @@ func usableSearchPath(sp []string) []string {
 
 // resolveSearchPath rewrites unqualified table references per the session
 // search_path. It's a no-op with an empty or public-only path.
-func resolveSearchPath(ctx context.Context, q querier, query string) string {
-	path := usableSearchPath(searchPathFrom(ctx))
+func resolveSearchPath(ctx context.Context, st *dbState, q querier, query string) string {
+	path := usableSearchPath(st, searchPathFrom(ctx))
 	if len(path) == 0 {
 		return query
 	}

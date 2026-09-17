@@ -23,7 +23,8 @@ import (
 type SQLite struct {
 	db       *sql.DB
 	conn     *sql.Conn // default connection for the engine's own methods
-	mainPath string    // path of the "public" schema file (or ":memory:")
+	mainPath string    // path of the database file (or ":memory:")
+	state    *dbState  // this database's catalog name, schemas and oid band
 }
 
 // maxConnections caps concurrent client sessions (each pins one connection),
@@ -39,9 +40,9 @@ const maxConnections = 100
 // client's transaction doesn't block the others.
 func Open(path string) (*SQLite, error) {
 	registerCatalog()
-	// Set before the first connection: the catalog is built in a connection
-	// hook that reads catalogDBName.
-	catalogDBName = dbNameFromPath(path)
+	// The connection hook builds this database's catalog; it finds the state by
+	// the path in the DSN it is handed.
+	state := stateFor(path)
 	dsn := buildDSN(path)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -60,7 +61,7 @@ func Open(path string) (*SQLite, error) {
 		db.Close()
 		return nil, fmt.Errorf("open sqlite %q: %w", path, err)
 	}
-	return &SQLite{db: db, conn: conn, mainPath: path}, nil
+	return &SQLite{db: db, conn: conn, mainPath: path, state: state}, nil
 }
 
 // Session pins a dedicated connection for one client. Implements core.Engine.
@@ -69,17 +70,18 @@ func (s *SQLite) Session(ctx context.Context) (core.Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &sqliteSession{conn: conn, mainPath: s.mainPath}, nil
+	return &sqliteSession{conn: conn, mainPath: s.mainPath, state: s.state}, nil
 }
 
 // sqliteSession is one client's dedicated connection.
 type sqliteSession struct {
 	conn     *sql.Conn
 	mainPath string
+	state    *dbState
 }
 
 func (ss *sqliteSession) Execute(ctx context.Context, sql string, args []core.Value) (*core.ResultSet, error) {
-	rs, err := execute(ctx, ss.conn, sql, args)
+	rs, err := execute(ctx, ss.state, ss.conn, sql, args)
 	// format_type() renders an enum from a registry loaded when the connection
 	// opens. Without this, a type created later in the same session renders as
 	// its storage type (text) until the client reconnects.
@@ -89,14 +91,14 @@ func (ss *sqliteSession) Execute(ctx context.Context, sql string, args []core.Va
 	return rs, err
 }
 func (ss *sqliteSession) Describe(ctx context.Context, sql string, args []core.Value) ([]core.Column, error) {
-	return describe(ctx, ss.conn, sql, args)
+	return describe(ctx, ss.state, ss.conn, sql, args)
 }
 func (ss *sqliteSession) Begin(ctx context.Context) (core.Tx, error) {
 	tx, err := ss.conn.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
-	return &sqliteTx{tx: tx}, nil
+	return &sqliteTx{tx: tx, state: ss.state}, nil
 }
 func (ss *sqliteSession) Close() error { return ss.conn.Close() }
 
@@ -124,7 +126,7 @@ type querier interface {
 // Execute runs a statement on the engine's own connection (used by tests and
 // convenience code; clients use Session).
 func (s *SQLite) Execute(ctx context.Context, query string, args []core.Value) (*core.ResultSet, error) {
-	return execute(ctx, s.conn, query, args)
+	return execute(ctx, s.state, s.conn, query, args)
 }
 
 // Begin starts a transaction on the engine's own connection.
@@ -133,29 +135,33 @@ func (s *SQLite) Begin(ctx context.Context) (core.Tx, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &sqliteTx{tx: tx}, nil
+	return &sqliteTx{tx: tx, state: s.state}, nil
 }
 
 // sqliteTx runs statements within a database/sql transaction.
-type sqliteTx struct{ tx *sql.Tx }
+type sqliteTx struct {
+	tx    *sql.Tx
+	state *dbState
+}
 
 func (t *sqliteTx) Execute(ctx context.Context, sql string, args []core.Value) (*core.ResultSet, error) {
-	return execute(ctx, t.tx, sql, args)
+	return execute(ctx, t.state, t.tx, sql, args)
 }
 func (t *sqliteTx) Describe(ctx context.Context, sql string, args []core.Value) ([]core.Column, error) {
-	return describe(ctx, t.tx, sql, args)
+	return describe(ctx, t.state, t.tx, sql, args)
 }
 func (t *sqliteTx) Commit() error   { return t.tx.Commit() }
 func (t *sqliteTx) Rollback() error { return t.tx.Rollback() }
 
-func execute(ctx context.Context, q querier, query string, args []core.Value) (*core.ResultSet, error) {
+func execute(ctx context.Context, st *dbState, q querier, query string, args []core.Value) (*core.ResultSet, error) {
 	if rs, ok := tryFunctionDDL(ctx, q, query); ok {
 		return rs, nil
 	}
-	query = qualifySchemaNames(query)
-	query = resolveSearchPath(ctx, q, query)
+	query = qualifySchemaNames(st, query)
+	query = resolveSearchPath(ctx, st, q, query)
 	query = stripPublicQualifier(query)
-	query = resolveCurrentSchema(ctx, q, query)
+	query = resolveCurrentSchema(ctx, st, query)
+	query = resolveCurrentDatabase(st, query)
 	query = resolveToRegclass(query)
 	query = rewriteSQLFunctions(query)
 	cmd := leadingCommand(query)
@@ -241,14 +247,15 @@ func resultCounters(res sql.Result) (affected, lastID int64) {
 // producing rows and without any side effect. For mutations with RETURNING it
 // introspects a read-only projection instead of running the mutation.
 func (s *SQLite) Describe(ctx context.Context, query string, args []core.Value) ([]core.Column, error) {
-	return describe(ctx, s.conn, query, args)
+	return describe(ctx, s.state, s.conn, query, args)
 }
 
-func describe(ctx context.Context, q querier, query string, args []core.Value) ([]core.Column, error) {
-	query = qualifySchemaNames(query)
-	query = resolveSearchPath(ctx, q, query)
+func describe(ctx context.Context, st *dbState, q querier, query string, args []core.Value) ([]core.Column, error) {
+	query = qualifySchemaNames(st, query)
+	query = resolveSearchPath(ctx, st, q, query)
 	query = stripPublicQualifier(query)
-	query = resolveCurrentSchema(ctx, q, query)
+	query = resolveCurrentSchema(ctx, st, query)
+	query = resolveCurrentDatabase(st, query)
 	query = resolveToRegclass(query)
 	query = rewriteSQLFunctions(query)
 	introSQL, ok := introspectionSQL(query)

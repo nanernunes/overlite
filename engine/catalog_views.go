@@ -10,7 +10,7 @@ import (
 // scope), @MASTER@ = the schema's table source (an sqlite_master or a filtered
 // view of it), @NS@ = namespace oid, @OFF@ = oid offset (keeps ids distinct
 // across schemas), @PG@ = the Postgres schema name.
-func frag(tmpl string, r schemaRef) string {
+func frag(tmpl string, r schemaRef, dbName string) string {
 	return strings.NewReplacer(
 		"@DB@", r.DB,
 		"@MASTER@", r.master(),
@@ -26,14 +26,14 @@ func frag(tmpl string, r schemaRef) string {
 		// current_database(); reporting SQLite's internal "main" made every
 		// information_schema query filtered by catalog return nothing, which
 		// is how gorm's migrator asks whether a table's columns exist.
-		"@DBNAME@", sqlQuote(catalogDBName),
+		"@DBNAME@", sqlQuote(dbName),
 	).Replace(tmpl)
 }
 
-func union(name string, refs []schemaRef, tmpl string) string {
+func union(name string, refs []schemaRef, tmpl, dbName string) string {
 	parts := make([]string, len(refs))
 	for i, r := range refs {
-		parts[i] = frag(tmpl, r)
+		parts[i] = frag(tmpl, r, dbName)
 	}
 	return "CREATE TEMP VIEW " + name + " AS\n" + strings.Join(parts, "\nUNION ALL\n")
 }
@@ -54,10 +54,10 @@ func withTableOID(stmt string) string {
 
 // unionWrap wraps union() so the view exposes extraCols (constant columns
 // pg_dump selects that aren't worth threading through every UNION branch).
-func unionWrap(name, extraCols string, refs []schemaRef, tmpl string) string {
+func unionWrap(name, extraCols string, refs []schemaRef, tmpl, dbName string) string {
 	parts := make([]string, len(refs))
 	for i, r := range refs {
-		parts[i] = frag(tmpl, r)
+		parts[i] = frag(tmpl, r, dbName)
 	}
 	return "CREATE TEMP VIEW " + name + " AS SELECT _u.*, " + extraCols +
 		" FROM (\n" + strings.Join(parts, "\nUNION ALL\n") + "\n) _u"
@@ -65,13 +65,13 @@ func unionWrap(name, extraCols string, refs []schemaRef, tmpl string) string {
 
 // unionOID is unionWrap with just a constant tableoid column (the catalog's own
 // oid in pg_class), a row's originating-catalog discriminator for pg_dump.
-func unionOID(name string, tableOID int, refs []schemaRef, tmpl string) string {
-	return unionWrap(name, strconv.Itoa(tableOID)+" AS tableoid", refs, tmpl)
+func unionOID(name string, tableOID int, refs []schemaRef, tmpl, dbName string) string {
+	return unionWrap(name, strconv.Itoa(tableOID)+" AS tableoid", refs, tmpl, dbName)
 }
 
 // dynamicCatalogViews returns the catalog views that span every attached
 // schema. Rebuilt whenever the set of schemas changes.
-func dynamicCatalogViews(refs []schemaRef) []string {
+func dynamicCatalogViews(refs []schemaRef, dbName string) []string {
 	// pg_namespace: fixed system schemas plus one row per real schema.
 	ns := "CREATE TEMP VIEW pg_namespace AS" +
 		" SELECT 11 AS oid,'pg_catalog' AS nspname,10 AS nspowner, 2615 AS tableoid, NULL AS nspacl" +
@@ -82,46 +82,46 @@ func dynamicCatalogViews(refs []schemaRef) []string {
 
 	return []string{
 		ns,
-		pgClassView(refs),
-		unionOID("pg_attribute", 1249, refs, pgAttributeTmpl),
-		unionOID("pg_attrdef", 2604, refs, pgAttrdefTmpl),
-		unionWrap("pg_index", "2610 AS tableoid, 0 AS indnullsnotdistinct", refs, pgIndexTmpl),
-		unionWrap("pg_constraint", "2606 AS tableoid, NULL AS conparentid2, 0 AS conperiod", refs, pgConstraintTmpl),
-		unionWrap("pg_trigger", "2620 AS tableoid, 0 AS tgparentid", refs, pgTriggerTmpl),
-		union(`"information_schema.tables"`, refs, infoTablesTmpl),
-		union(`"information_schema.columns"`, refs, infoColumnsTmpl),
-		union(`"information_schema.table_constraints"`, refs, infoTableConstraintsTmpl),
-		union(`"information_schema.key_column_usage"`, refs, infoKeyColumnUsageTmpl),
-		union(`"information_schema.referential_constraints"`, refs, infoReferentialConstraintsTmpl),
-		union(`"information_schema.constraint_column_usage"`, refs, infoConstraintColumnUsageTmpl),
-		union(`"information_schema.views"`, refs, infoViewsTmpl),
-		union("pg_tables", refs, pgTablesTmpl),
-		union("pg_indexes", refs, pgIndexesTmpl),
-		union("pg_views", refs, pgViewsTmpl),
-		infoSchemataView(refs),
-		infoSequencesView(),
-		infoCheckConstraintsView(),
-		infoRoutinesView(),
+		pgClassView(refs, dbName),
+		unionOID("pg_attribute", 1249, refs, pgAttributeTmpl, dbName),
+		unionOID("pg_attrdef", 2604, refs, pgAttrdefTmpl, dbName),
+		unionWrap("pg_index", "2610 AS tableoid, 0 AS indnullsnotdistinct", refs, pgIndexTmpl, dbName),
+		unionWrap("pg_constraint", "2606 AS tableoid, NULL AS conparentid2, 0 AS conperiod", refs, pgConstraintTmpl, dbName),
+		unionWrap("pg_trigger", "2620 AS tableoid, 0 AS tgparentid", refs, pgTriggerTmpl, dbName),
+		union(`"information_schema.tables"`, refs, infoTablesTmpl, dbName),
+		union(`"information_schema.columns"`, refs, infoColumnsTmpl, dbName),
+		union(`"information_schema.table_constraints"`, refs, infoTableConstraintsTmpl, dbName),
+		union(`"information_schema.key_column_usage"`, refs, infoKeyColumnUsageTmpl, dbName),
+		union(`"information_schema.referential_constraints"`, refs, infoReferentialConstraintsTmpl, dbName),
+		union(`"information_schema.constraint_column_usage"`, refs, infoConstraintColumnUsageTmpl, dbName),
+		union(`"information_schema.views"`, refs, infoViewsTmpl, dbName),
+		union("pg_tables", refs, pgTablesTmpl, dbName),
+		union("pg_indexes", refs, pgIndexesTmpl, dbName),
+		union("pg_views", refs, pgViewsTmpl, dbName),
+		infoSchemataView(refs, dbName),
+		infoSequencesView(dbName),
+		infoCheckConstraintsView(dbName),
+		infoRoutinesView(dbName),
 		pgProcView(),
 	}
 }
 
 // infoSchemataView lists every schema (system + user) as information_schema.schemata.
-func infoSchemataView(refs []schemaRef) string {
+func infoSchemataView(refs []schemaRef, dbName string) string {
 	v := `CREATE TEMP VIEW "information_schema.schemata" AS` +
-		` SELECT ` + sqlQuote(catalogDBName) + ` AS catalog_name, 'information_schema' AS schema_name, ` +
+		` SELECT ` + sqlQuote(dbName) + ` AS catalog_name, 'information_schema' AS schema_name, ` +
 		sqlQuote(catalogRole) + ` AS schema_owner` +
-		` UNION ALL SELECT ` + sqlQuote(catalogDBName) + `,'pg_catalog',` + sqlQuote(catalogRole)
+		` UNION ALL SELECT ` + sqlQuote(dbName) + `,'pg_catalog',` + sqlQuote(catalogRole)
 	for _, r := range refs {
-		v += ` UNION ALL SELECT ` + sqlQuote(catalogDBName) + `,'` + r.PgName + `',` + sqlQuote(catalogRole)
+		v += ` UNION ALL SELECT ` + sqlQuote(dbName) + `,'` + r.PgName + `',` + sqlQuote(catalogRole)
 	}
 	return v
 }
 
 // infoSequencesView exposes the internal sequence table as information_schema.sequences.
-func infoSequencesView() string {
+func infoSequencesView(dbName string) string {
 	return `CREATE TEMP VIEW "information_schema.sequences" AS
-	 SELECT ` + sqlQuote(catalogDBName) + ` AS sequence_catalog, 'public' AS sequence_schema,
+	 SELECT ` + sqlQuote(dbName) + ` AS sequence_catalog, 'public' AS sequence_schema,
 	        seqname AS sequence_name, 'bigint' AS data_type, 64 AS numeric_precision,
 	        2 AS numeric_precision_radix, 0 AS numeric_scale,
 	        CAST(start_value AS TEXT) AS start_value, CAST(min_value AS TEXT) AS minimum_value,
@@ -132,9 +132,9 @@ func infoSequencesView() string {
 
 // infoCheckConstraintsView is present but empty (we don't enumerate CHECK
 // clauses yet). infoRoutinesView is defined in catalog.go from the function list.
-func infoCheckConstraintsView() string {
+func infoCheckConstraintsView(dbName string) string {
 	return `CREATE TEMP VIEW "information_schema.check_constraints" AS
-	 SELECT ` + sqlQuote(catalogDBName) + ` AS constraint_catalog, 'public' AS constraint_schema,
+	 SELECT ` + sqlQuote(dbName) + ` AS constraint_catalog, 'public' AS constraint_schema,
 	        '' AS constraint_name, '' AS check_clause WHERE 0`
 }
 
@@ -152,17 +152,17 @@ WHERE trg.type = 'trigger' AND trg.name NOT LIKE 'sqlite_%' AND trg.name NOT GLO
 
 // pgClassView is pg_class over every schema, plus the sequences (relkind 'S')
 // that live in the main/public database, so \ds and \d <seq> find them.
-func pgClassView(refs []schemaRef) string {
+func pgClassView(refs []schemaRef, dbName string) string {
 	parts := make([]string, 0, len(refs)+1)
 	for _, r := range refs {
-		parts = append(parts, frag(pgClassTmpl, r))
+		parts = append(parts, frag(pgClassTmpl, r, dbName))
 	}
 	for _, r := range refs {
-		parts = append(parts, frag(pgUniqueIndexClassTmpl, r))
+		parts = append(parts, frag(pgUniqueIndexClassTmpl, r, dbName))
 	}
 	for _, r := range refs {
 		if r.PgName == "public" {
-			parts = append(parts, frag(pgSequenceClassTmpl, r))
+			parts = append(parts, frag(pgSequenceClassTmpl, r, dbName))
 		}
 	}
 	return "CREATE TEMP VIEW pg_class AS SELECT _c.*, 1259 AS tableoid," +

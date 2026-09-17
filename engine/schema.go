@@ -54,11 +54,7 @@ func (r schemaRef) master() string {
 
 // catalogRole is the role name shown as owner / returned by current_user etc.
 // It follows the official Postgres image's POSTGRES_USER (default "postgres").
-// catalogDBName is the database name, derived from the file we point at.
-var (
-	catalogRole   = envOr("POSTGRES_USER", "postgres")
-	catalogDBName = "main"
-)
+var catalogRole = envOr("POSTGRES_USER", "postgres")
 
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
@@ -82,7 +78,7 @@ func sqlQuote(s string) string {
 
 // metaCatalogViews are rebuilt per connection because they embed the (possibly
 // runtime-derived) role and database name.
-func metaCatalogViews() []string {
+func metaCatalogViews(dbName string) []string {
 	return []string{
 		// The configured role gets oid 10 (Postgres' bootstrap superuser oid), so
 		// object owners (relowner=10 in pg_class) resolve to it for pg_dump.
@@ -97,7 +93,7 @@ func metaCatalogViews() []string {
 		 start_value, min_value, max_value, increment AS increment_by, is_cycled AS cycle,
 		 cache_size, CASE WHEN is_called THEN last_value ELSE NULL END AS last_value
 		 FROM _overlite_sequences`,
-		`CREATE TEMP VIEW pg_database AS SELECT 1 AS oid, ` + sqlQuote(catalogDBName) + ` AS datname,
+		`CREATE TEMP VIEW pg_database AS SELECT 1 AS oid, ` + sqlQuote(dbName) + ` AS datname,
 		 10 AS datdba, 6 AS encoding, 'c' AS datlocprovider, 'C' AS datcollate, 'C' AS datctype,
 		 NULL AS daticulocale, NULL AS daticurules, NULL AS datcollversion,
 		 0 AS datistemplate, 1 AS datallowconn, -1 AS datconnlimit, 0 AS dattablespace,
@@ -178,6 +174,7 @@ func schemaRefs(schemas []string) []schemaRef {
 // catalog views spanning them. Called from the connection hook and after
 // CREATE/DROP SCHEMA.
 func setupConnection(ctx context.Context, exec func(string) error, query func(string) ([]string, error), mainPath string) error {
+	st := stateFor(mainPath)
 	// The schema registry is the list of schemas this database holds.
 	if err := exec(schemasTableDDL); err != nil {
 		return err
@@ -185,7 +182,7 @@ func setupConnection(ctx context.Context, exec func(string) error, query func(st
 	var schemas []string
 	if names, err := query("SELECT name FROM _overlite_schemas ORDER BY name"); err == nil {
 		schemas = names
-		setSchemaCache(names) // the schema-qualifier rewrite reads this
+		st.setSchemas(names) // the schema-qualifier rewrite reads this
 	}
 
 	// The internal roles table (pg_roles reads from it) must exist before the
@@ -281,7 +278,7 @@ func setupConnection(ctx context.Context, exec func(string) error, query func(st
 	}
 	// Meta + schema-spanning views are rebuilt (DROP + CREATE) so they pick up
 	// the current role/database name and schema set.
-	rebuilt := append(metaCatalogViews(), dynamicCatalogViews(refs)...)
+	rebuilt := append(metaCatalogViews(st.dbName()), dynamicCatalogViews(refs, st.dbName())...)
 	for _, stmt := range rebuilt {
 		if err := exec(dropViewOf(stmt)); err != nil {
 			return err

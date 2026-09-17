@@ -149,7 +149,11 @@ var registerCatalog = sync.OnceFunc(func() {
 	})
 	scalar("current_schema", 0, func([]driver.Value) (driver.Value, error) { return "public", nil })
 	scalar("current_schemas", -1, func([]driver.Value) (driver.Value, error) { return "{pg_catalog,public}", nil })
-	scalar("current_database", 0, func([]driver.Value) (driver.Value, error) { return catalogDBName, nil })
+	// current_database() is resolved per statement (resolveCurrentDatabase):
+	// a process serves many databases, and a globally registered function
+	// cannot tell which one is asking. This is the fallback for a caller that
+	// reaches SQLite without going through the rewrite.
+	scalar("current_database", 0, func([]driver.Value) (driver.Value, error) { return "main", nil })
 	scalar("current_user", 0, func([]driver.Value) (driver.Value, error) { return catalogRole, nil })
 	scalar("session_user", 0, func([]driver.Value) (driver.Value, error) { return catalogRole, nil })
 	scalar("pg_get_userbyid", 1, func([]driver.Value) (driver.Value, error) { return catalogRole, nil })
@@ -997,12 +1001,12 @@ func pgProcView() string {
 }
 
 // infoRoutinesView builds information_schema.routines from the same list.
-func infoRoutinesView() string {
+func infoRoutinesView(dbName string) string {
 	const row = `SELECT %[2]s AS specific_catalog, 'pg_catalog' AS specific_schema,` +
 		` %[1]s || '_' || %[3]d AS specific_name, %[2]s AS routine_catalog,` +
 		` 'pg_catalog' AS routine_schema, %[1]s AS routine_name, 'FUNCTION' AS routine_type,` +
 		` 'text' AS data_type, NULL AS routine_definition`
-	cat := sqlQuote(catalogDBName)
+	cat := sqlQuote(dbName)
 	parts := make([]string, len(catalogFunctionNames))
 	for i, name := range catalogFunctionNames {
 		parts[i] = fmt.Sprintf(row, sqlQuote(name), cat, 100000+i)
