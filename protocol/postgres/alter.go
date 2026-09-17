@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"overlite/core"
@@ -279,7 +280,8 @@ func (s *session) rebuildTable(table, newDDL string) error {
 // table is the qualified spelling to write in statements; master and name say
 // where to read the table's indexes and triggers back from.
 func (s *session) rebuildTableCopying(table, newDDL string, copy []string, master, name string) error {
-	aux := s.auxDDLIn(master, name)
+	schema, _ := splitQualifiedRef(table)
+	aux := qualifyAuxDDL(s.auxDDLIn(master, name), schema)
 	tmp := tempRebuildName(table)
 	tmpDDL := renameCreateTableTo(newDDL, tmp)
 
@@ -296,9 +298,23 @@ func (s *session) rebuildTableCopying(table, newDDL string, copy []string, maste
 	if _, err := s.exec("SAVEPOINT _rb", nil); err != nil {
 		return err
 	}
+	// The table disappears for an instant between the DROP and the RENAME, and
+	// SQLite checks any foreign key pointing at it as soon as it goes. Deferring
+	// enforcement to the end of the savepoint keeps those keys intact without
+	// turning them off: PRAGMA foreign_keys itself is ignored inside a
+	// transaction, which this is.
+	_, _ = s.exec("PRAGMA defer_foreign_keys = ON", nil)
+	// RENAME TO re-resolves every reference in the schema so it can fix the
+	// ones pointing at the renamed table. Here the table it is replacing has
+	// just been dropped, so that pass fails on any foreign key still naming it.
+	// The legacy behaviour renames without the fix-up, which is what a
+	// create-copy-swap wants: the references already name the final table.
+	_, _ = s.exec("PRAGMA legacy_alter_table = ON", nil)
 	fail := func(err error) error {
 		_, _ = s.exec("ROLLBACK TO _rb", nil)
 		_, _ = s.exec("RELEASE _rb", nil)
+		_, _ = s.exec("PRAGMA legacy_alter_table = OFF", nil)
+		_, _ = s.exec("PRAGMA defer_foreign_keys = OFF", nil)
 		return err
 	}
 	steps := []string{
@@ -310,11 +326,17 @@ func (s *session) rebuildTableCopying(table, newDDL string, copy []string, maste
 	}
 	steps = append(steps, aux...)
 	for _, st := range steps {
+		logQuery("rebuild", st)
 		if _, err := s.exec(st, nil); err != nil {
 			return fail(err)
 		}
 	}
 	_, _ = s.exec("RELEASE _rb", nil)
+	_, _ = s.exec("PRAGMA legacy_alter_table = OFF", nil)
+	// Deferral lasts until the enclosing transaction ends, which is not always
+	// here: a rebuild inside a client transaction would otherwise leave foreign
+	// keys unchecked for the rest of it.
+	_, _ = s.exec("PRAGMA defer_foreign_keys = OFF", nil)
 	return nil
 }
 
@@ -790,4 +812,31 @@ func splitQualifiedRef(ref string) (schema, table string) {
 		}
 	}
 	return "", unquoteIdent(ref)
+}
+
+// reAuxObjectName captures the name of an index or trigger in its CREATE.
+var reAuxObjectName = regexp.MustCompile(
+	`(?is)^(\s*CREATE\s+(?:UNIQUE\s+)?(?:INDEX|TRIGGER)\s+(?:IF\s+NOT\s+EXISTS\s+)?)("[^"]+"|[\w.]+)`)
+
+// qualifyAuxDDL puts an index or trigger back in the schema it came from.
+//
+// A schema is an attached database in multi-file mode, and SQLite names those
+// objects by qualifying the object rather than the table. sqlite_master stores
+// the statement without that qualifier, so replaying it verbatim would rebuild
+// the index in main, against a table that is not there.
+func qualifyAuxDDL(stmts []string, schema string) []string {
+	if schema == "" {
+		return stmts
+	}
+	out := make([]string, 0, len(stmts))
+	for _, stmt := range stmts {
+		m := reAuxObjectName.FindStringSubmatch(stmt)
+		if m == nil {
+			out = append(out, stmt)
+			continue
+		}
+		name := unquoteIdent(m[2])
+		out = append(out, m[1]+qIdent(schema)+"."+qIdent(name)+stmt[len(m[0]):])
+	}
+	return out
 }
