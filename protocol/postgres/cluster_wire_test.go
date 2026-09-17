@@ -16,12 +16,17 @@ import (
 	"overlite/server"
 )
 
-// startCluster serves a directory of databases, the way --db-dir does.
+// entryDatabase is the database a test server is started with: the file it was
+// pointed at, always there to connect to.
+const entryDatabase = "postgres"
+
+// startCluster serves a directory of databases, the way pointing overlite at a
+// file does.
 func startCluster(t *testing.T, maxOpen int) (addr, dir string) {
 	t.Helper()
 	dir = t.TempDir()
 
-	cluster, err := engine.OpenDir(dir, maxOpen)
+	cluster, err := engine.OpenCluster(filepath.Join(dir, entryDatabase+".db"), maxOpen)
 	require.NoError(t, err)
 
 	srv, err := server.New("127.0.0.1:0", postgres.New(), cluster)
@@ -60,8 +65,8 @@ func TestDatabasePerFile(t *testing.T) {
 	addr, dir := startCluster(t, 8)
 	ctx := context.Background()
 
-	// The maintenance database is always there to connect to.
-	admin := dialDB(t, addr, engine.MaintenanceDatabase)
+	// The database the server was started with is always there to connect to.
+	admin := dialDB(t, addr, entryDatabase)
 	require.NotNil(t, admin)
 
 	first := mustCreateDatabase(t, addr, admin, "acme")
@@ -109,7 +114,7 @@ func mustCreateDatabase(t *testing.T, addr string, admin *pgx.Conn, name string)
 // does hold — not a silent landing on whichever database happens to be here.
 func TestUnknownDatabaseIsRefused(t *testing.T) {
 	addr, _ := startCluster(t, 8)
-	admin := dialDB(t, addr, engine.MaintenanceDatabase)
+	admin := dialDB(t, addr, entryDatabase)
 	require.NotNil(t, admin)
 	mustExec(t, admin, `CREATE DATABASE shop`)
 
@@ -129,7 +134,7 @@ func TestCreateAndDropDatabase(t *testing.T) {
 	addr, dir := startCluster(t, 8)
 	ctx := context.Background()
 
-	boot := dialDB(t, addr, engine.MaintenanceDatabase)
+	boot := dialDB(t, addr, entryDatabase)
 	require.NotNil(t, boot)
 	conn := mustCreateDatabase(t, addr, boot, "tenant_a")
 
@@ -146,7 +151,7 @@ func TestCreateAndDropDatabase(t *testing.T) {
 		}
 		return out
 	}
-	assert.Equal(t, []string{"postgres", "tenant_a"}, names())
+	assert.Equal(t, []string{entryDatabase, "tenant_a"}, names())
 
 	// Creating one that exists is an error; IF NOT EXISTS is not.
 	_, err := boot.Exec(ctx, `CREATE DATABASE tenant_a`)
@@ -167,7 +172,7 @@ func TestCreateAndDropDatabase(t *testing.T) {
 		return err == nil
 	}, 3*time.Second, 50*time.Millisecond)
 
-	assert.Equal(t, []string{"postgres"}, names())
+	assert.Equal(t, []string{entryDatabase}, names())
 	assert.NoFileExists(t, filepath.Join(dir, "tenant_a.db"))
 
 	// And it is gone for a client too.
@@ -181,7 +186,7 @@ func TestMoreDatabasesThanStayOpen(t *testing.T) {
 	addr, _ := startCluster(t, maxOpen)
 	ctx := context.Background()
 
-	admin := dialDB(t, addr, engine.MaintenanceDatabase)
+	admin := dialDB(t, addr, entryDatabase)
 	require.NotNil(t, admin)
 	for i := 0; i < total; i++ {
 		mustExec(t, admin, fmt.Sprintf(`CREATE DATABASE t%02d`, i))
@@ -209,4 +214,82 @@ func TestMoreDatabasesThanStayOpen(t *testing.T) {
 		assert.Equal(t, name, v)
 		c.Close(ctx)
 	}
+}
+
+// The file overlite is pointed at brings its directory with it: a database
+// created from a connection lands beside it, and is reachable by name. It is
+// also the one database that is always there, so it cannot be dropped.
+func TestEntryDatabaseBringsItsDirectory(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "shop.db")
+
+	cluster, err := engine.OpenCluster(path, 8)
+	require.NoError(t, err)
+
+	srv, err := server.New("127.0.0.1:0", postgres.New(), cluster)
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(context.Background())
+	go srv.Serve(ctx)
+	t.Cleanup(func() {
+		cancel()
+		srv.Close()
+		cluster.Close()
+	})
+	addr := srv.Addr()
+
+	// Pointing at a path that did not exist creates it, so there is something
+	// to connect to.
+	assert.FileExists(t, path)
+
+	shop := dialDB(t, addr, "shop")
+	require.NotNil(t, shop, "the database the server was started with is not reachable")
+
+	// A database created from here lands beside the file.
+	mustExec(t, shop, `CREATE DATABASE warehouse`)
+	assert.FileExists(t, filepath.Join(dir, "warehouse.db"))
+
+	warehouse := dialDB(t, addr, "warehouse")
+	require.NotNil(t, warehouse)
+	mustExec(t, warehouse, `CREATE TABLE t (v text)`)
+	_, err = warehouse.Exec(context.Background(), `INSERT INTO t VALUES ('kept')`)
+	require.NoError(t, err)
+
+	// The entry database cannot be dropped: it is the way back in.
+	_, err = warehouse.Exec(context.Background(), `DROP DATABASE shop`)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "started with")
+}
+
+// A database already sitting beside the file is served without being created
+// through overlite, which is what makes the directory the unit.
+func TestExistingSiblingIsADatabase(t *testing.T) {
+	dir := t.TempDir()
+
+	// A database written before the server ever starts.
+	pre, err := engine.Open(filepath.Join(dir, "legacy.db"))
+	require.NoError(t, err)
+	_, err = pre.Execute(context.Background(), `CREATE TABLE t (v text)`, nil)
+	require.NoError(t, err)
+	_, err = pre.Execute(context.Background(), `INSERT INTO t VALUES ('from before')`, nil)
+	require.NoError(t, err)
+	pre.Close()
+
+	cluster, err := engine.OpenCluster(filepath.Join(dir, "main.db"), 8)
+	require.NoError(t, err)
+	srv, err := server.New("127.0.0.1:0", postgres.New(), cluster)
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(context.Background())
+	go srv.Serve(ctx)
+	t.Cleanup(func() {
+		cancel()
+		srv.Close()
+		cluster.Close()
+	})
+
+	conn := dialDB(t, srv.Addr(), "legacy")
+	require.NotNil(t, conn, "a database beside the entry file was not served")
+
+	var v string
+	require.NoError(t, conn.QueryRow(context.Background(), `SELECT v FROM t`).Scan(&v))
+	assert.Equal(t, "from before", v)
 }

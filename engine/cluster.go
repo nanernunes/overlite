@@ -52,11 +52,15 @@ var errNotADirectory = fmt.Errorf(
 
 // --- a directory of databases -------------------------------------------------
 
-// Dir serves every <name>.db in a directory, opening each on demand. Idle
-// engines are closed once maxOpen is exceeded, so a deployment can hold far
-// more databases than it keeps open at once.
+// Dir serves every <name>.db beside the file overlite was pointed at, opening
+// each on demand. Idle engines are closed once maxOpen is exceeded, so a
+// deployment can hold far more databases than it keeps open at once.
 type Dir struct {
-	dir     string
+	dir string
+	// entry is the database named by the path overlite was started with. It is
+	// always there to connect to, which is what lets a client issue its first
+	// CREATE DATABASE, so it cannot be dropped.
+	entry   string
 	maxOpen int
 
 	mu   sync.Mutex
@@ -75,22 +79,31 @@ type openDB struct {
 // latency of reopening a database that went cold.
 const DefaultMaxOpenDatabases = 64
 
-// MaintenanceDatabase always exists, as it does in PostgreSQL. A client has to
-// connect to some database before it can create one, and tools default to this
-// name, so an empty directory would otherwise have nothing to connect to.
-const MaintenanceDatabase = "postgres"
-
-// OpenDir serves the databases in dir. It is created if it does not exist.
-func OpenDir(dir string, maxOpen int) (*Dir, error) {
+// OpenCluster serves the database at path, and every <name>.db beside it. A
+// SQLite file is a database, so the directory holding one is the set of them:
+// CREATE DATABASE writes a new file there, and connecting by name opens it.
+//
+// The file at path is created if it does not exist, so pointing overlite at a
+// fresh path gives a client somewhere to connect and create the rest from.
+func OpenCluster(path string, maxOpen int) (*Dir, error) {
 	if maxOpen <= 0 {
 		maxOpen = DefaultMaxOpenDatabases
 	}
+	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("create database directory %s: %w", dir, err)
 	}
-	d := &Dir{dir: dir, maxOpen: maxOpen, open: map[string]*openDB{}}
-	if !d.exists(MaintenanceDatabase) {
-		if err := d.CreateDatabase(context.Background(), MaintenanceDatabase); err != nil {
+
+	entry := strings.TrimSuffix(filepath.Base(path), ".db")
+	if !ValidDatabaseName(entry) {
+		return nil, fmt.Errorf("%s is not a usable database name: a database name must start "+
+			"with a letter or underscore and contain only letters, digits, underscores and "+
+			"dashes, because it is the name of the file that stores it", entry)
+	}
+
+	d := &Dir{dir: dir, entry: entry, maxOpen: maxOpen, open: map[string]*openDB{}}
+	if !d.exists(entry) {
+		if err := d.CreateDatabase(context.Background(), entry); err != nil {
 			return nil, err
 		}
 	}
@@ -210,8 +223,9 @@ func (d *Dir) CreateDatabase(ctx context.Context, database string) error {
 
 // DropDatabase closes the database and deletes its files.
 func (d *Dir) DropDatabase(_ context.Context, database string) error {
-	if database == MaintenanceDatabase {
-		return fmt.Errorf("cannot drop the maintenance database %q", MaintenanceDatabase)
+	if database == d.entry {
+		return fmt.Errorf("cannot drop %q: it is the database this server was started with, "+
+			"and the one a client connects to before it can create another", database)
 	}
 	if !d.exists(database) {
 		return fmt.Errorf("database %q does not exist", database)

@@ -38,7 +38,6 @@ func newRootCmd() *cobra.Command {
 		driver string
 		host   string
 		db     string
-		dbDir  string
 		port   int
 		maxDBs int
 	)
@@ -47,11 +46,11 @@ func newRootCmd() *cobra.Command {
 		Short: "A PostgreSQL-speaking server backed by SQLite",
 		Long: "overlite speaks the PostgreSQL wire protocol on the front and " +
 			"stores everything in SQLite files on the back.\n\n" +
-			"One database, given positionally or with --db:\n" +
-			"  overlite shop.db\n  overlite --db shop.db\n\n" +
-			"Or a directory of them, one file per database, each opened on demand:\n" +
-			"  overlite --db-dir /data\n" +
-			"The client picks with the database name it connects to.",
+			"A SQLite file is a database, so the file you point at is the database " +
+			"you connect to, and the directory holding it is the rest:\n" +
+			"  overlite shop.db\n  overlite --db /data/postgres.db\n\n" +
+			"CREATE DATABASE writes a new file beside it, and a client reaches one " +
+			"by the database name it connects to.",
 		Version:       version,
 		Args:          cobra.MaximumNArgs(1),
 		SilenceUsage:  true,
@@ -60,7 +59,7 @@ func newRootCmd() *cobra.Command {
 			if len(args) == 1 {
 				db = args[0] // positional wins over --db
 			}
-			return run(driver, host, db, dbDir, port, maxDBs)
+			return run(driver, host, db, port, maxDBs)
 		},
 	}
 	// Cobra's default is "overlite version v0.1.0"; the word adds nothing.
@@ -74,20 +73,18 @@ func newRootCmd() *cobra.Command {
 		"port to listen on (default: the protocol's, or <DRIVER>_PORT)")
 	cmd.Flags().StringVar(&db, "db", "postgres.db",
 		"path to the SQLite file (or :memory:); its name becomes the database name")
-	cmd.Flags().StringVar(&dbDir, "db-dir", "",
-		"serve a directory of databases: <name>.db per database, opened on demand")
 	cmd.Flags().IntVar(&maxDBs, "max-open-databases", engine.DefaultMaxOpenDatabases,
-		"with --db-dir, how many databases to keep open at once")
+		"how many databases to keep open at once; the rest reopen on demand")
 	return cmd
 }
 
-func run(driver, host, db, dbDir string, port, maxDBs int) error {
+func run(driver, host, db string, port, maxDBs int) error {
 	proto, err := selectDriver(driver)
 	if err != nil {
 		return err
 	}
 
-	cluster, describe, err := openCluster(db, dbDir, maxDBs)
+	cluster, describe, err := openCluster(db, maxDBs)
 	if err != nil {
 		return err
 	}
@@ -200,23 +197,23 @@ func describeDBPath(db string, err error) error {
 	return err
 }
 
-// openCluster builds the set of databases to serve: one file, or a directory
-// of them. It returns a line describing the choice for the startup log.
-func openCluster(db, dbDir string, maxDBs int) (core.Cluster, string, error) {
-	if dbDir != "" {
-		dir, err := engine.OpenDir(dbDir, maxDBs)
+// openCluster builds the set of databases to serve. A file on disk brings its
+// directory with it: every <name>.db beside it is a database too. An in-memory
+// database has no directory, so it is served on its own.
+func openCluster(db string, maxDBs int) (core.Cluster, string, error) {
+	if db == ":memory:" {
+		eng, err := engine.Open(db)
 		if err != nil {
 			return nil, "", err
 		}
-		names, _ := dir.Databases()
-		return dir, fmt.Sprintf("sqlite dir %s (%d databases, %d kept open)",
-			dbDir, len(names), maxDBs), nil
+		return engine.Single("main", eng), "sqlite :memory: (db=main)", nil
 	}
 
-	eng, err := engine.Open(db)
+	cluster, err := engine.OpenCluster(db, maxDBs)
 	if err != nil {
-		return nil, "", fmt.Errorf("open engine %s: %w", db, describeDBPath(db, err))
+		return nil, "", fmt.Errorf("open %s: %w", db, describeDBPath(db, err))
 	}
-	name := dbName(db)
-	return engine.Single(name, eng), fmt.Sprintf("sqlite %s (db=%s)", db, name), nil
+	names, _ := cluster.Databases()
+	return cluster, fmt.Sprintf("sqlite %s (db=%s, %d in %s, %d kept open)",
+		db, dbName(db), len(names), filepath.Dir(db), maxDBs), nil
 }
