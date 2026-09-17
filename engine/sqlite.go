@@ -211,14 +211,28 @@ func doExec(ctx context.Context, q querier, query string, args []core.Value, cmd
 	if err != nil {
 		return nil, err
 	}
-	affected, _ := res.RowsAffected()
-	lastID, _ := res.LastInsertId()
+	affected, lastID := resultCounters(res)
 	return &core.ResultSet{
 		IsQuery:      false,
 		RowsAffected: affected,
 		LastInsertID: lastID,
 		Command:      cmd,
 	}, nil
+}
+
+// resultCounters reads the row counters out of a Result.
+//
+// Handing it a statement with nothing to run — a lone comment — makes
+// modernc.org/sqlite return a nil driver.Result with a nil error, which
+// database/sql wraps in a non-nil sql.Result that panics on the first counter
+// call. The protocol layer answers those before they reach the engine
+// (isBlankStatement), so this is the belt to that suspenders: a driver that
+// breaks its contract should not take the process down.
+func resultCounters(res sql.Result) (affected, lastID int64) {
+	defer func() { _ = recover() }()
+	affected, _ = res.RowsAffected()
+	lastID, _ = res.LastInsertId()
+	return affected, lastID
 }
 
 // Describe implements core.Engine. It returns a query's output columns without

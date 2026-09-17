@@ -368,7 +368,9 @@ func (s *session) handleSimpleQuery(body []byte) error {
 	sql := strings.TrimRight(string(body), "\x00")
 	sql = strings.TrimSpace(strings.TrimRight(strings.TrimSpace(sql), ";"))
 
-	if sql == "" {
+	// A statement with nothing executable in it, including one that is only a
+	// comment, gets EmptyQueryResponse and never reaches the engine.
+	if isBlankStatement(sql) {
 		return s.c.send(msgEmptyQuery, nil)
 	}
 

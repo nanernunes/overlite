@@ -76,6 +76,9 @@ type prepared struct {
 	sql       string // rewritten, ready for the engine
 	raw       string // original statement, kept for sequence expansion (pre-rewrite)
 	numParams int
+	// blank marks a statement with nothing executable in it (a lone comment),
+	// answered with EmptyQueryResponse at Execute.
+	blank bool
 	// util is set for intercepted statements (SET/SHOW/...) that bypass the
 	// engine and return a synthetic result.
 	util *core.ResultSet
@@ -355,6 +358,10 @@ func (s *session) handleParse(body []byte) error {
 	}
 
 	raw := trimStatement(query)
+	if isBlankStatement(raw) {
+		s.prepared[name] = &prepared{blank: true}
+		return s.c.send(msgParseComplete, nil)
+	}
 	if kind := txControlKind(raw); kind != "" {
 		s.prepared[name] = &prepared{txControl: kind}
 		return s.c.send(msgParseComplete, nil)
@@ -465,7 +472,7 @@ func (s *session) handleDescribe(body []byte) error {
 		if prep == nil {
 			return s.protoError("26000", "unknown prepared statement "+quoteName(name))
 		}
-		if prep.util != nil || prep.txControl != "" || prep.seqDDL != "" || prep.typeDDL != "" || prep.setRole != "" || prep.grant != "" || prep.rlsDDL != "" || prep.alterDDL != "" || prep.listenNotify != "" || prep.comment != "" || prep.searchPathStmt != "" {
+		if prep.blank || prep.util != nil || prep.txControl != "" || prep.seqDDL != "" || prep.typeDDL != "" || prep.setRole != "" || prep.grant != "" || prep.rlsDDL != "" || prep.alterDDL != "" || prep.listenNotify != "" || prep.comment != "" || prep.searchPathStmt != "" {
 			if err := s.c.sendParameterDescription(0); err != nil {
 				return err
 			}
@@ -483,7 +490,7 @@ func (s *session) handleDescribe(body []byte) error {
 			return s.protoError("34000", "unknown portal "+quoteName(name))
 		}
 		prep = pt.prep
-		if prep.util != nil || prep.txControl != "" || prep.seqDDL != "" || prep.typeDDL != "" || prep.setRole != "" || prep.grant != "" || prep.rlsDDL != "" || prep.alterDDL != "" || prep.listenNotify != "" || prep.comment != "" || prep.searchPathStmt != "" {
+		if prep.blank || prep.util != nil || prep.txControl != "" || prep.seqDDL != "" || prep.typeDDL != "" || prep.setRole != "" || prep.grant != "" || prep.rlsDDL != "" || prep.alterDDL != "" || prep.listenNotify != "" || prep.comment != "" || prep.searchPathStmt != "" {
 			return s.sendUtilDescribe(prep.util)
 		}
 		args = pt.params
@@ -523,6 +530,10 @@ func (s *session) handleExecute(body []byte) error {
 	pt := s.portals[portalName]
 	if pt == nil {
 		return s.protoError("34000", "unknown portal "+quoteName(portalName))
+	}
+
+	if pt.prep.blank {
+		return s.c.send(msgEmptyQuery, nil)
 	}
 
 	if kind := pt.prep.txControl; kind != "" {

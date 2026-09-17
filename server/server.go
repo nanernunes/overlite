@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log"
 	"net"
+	"runtime/debug"
 	"sync"
 
 	"overlite/core"
@@ -65,6 +66,15 @@ func (s *Server) Serve(ctx context.Context) error {
 func (s *Server) handle(ctx context.Context, conn net.Conn) {
 	defer s.untrack(conn)
 	defer conn.Close()
+	// One client must not be able to take the server down with it. A panic in
+	// this connection's goroutine would otherwise end the process and drop
+	// every other session, so it is contained here and reported.
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("%s: connection %s: panic: %v\n%s",
+				s.proto.Name(), conn.RemoteAddr(), r, debug.Stack())
+		}
+	}()
 	if err := s.proto.Serve(ctx, conn, s.engine); err != nil {
 		log.Printf("%s: connection %s: %v", s.proto.Name(), conn.RemoteAddr(), err)
 	}
