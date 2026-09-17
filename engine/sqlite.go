@@ -159,6 +159,11 @@ func execute(ctx context.Context, q querier, query string, args []core.Value) (*
 	query = resolveCurrentSchema(ctx, q, query)
 	query = resolveToRegclass(query)
 	query = rewriteSQLFunctions(query)
+	query = rewriteMultiFileIndex(query)
+	query, err := rewriteMultiFileReferences(query)
+	if err != nil {
+		return nil, err
+	}
 	cmd := leadingCommand(query)
 	if isQuery(query) {
 		return doQuery(ctx, q, query, args, cmd)

@@ -1,6 +1,10 @@
 package engine
 
-import "os"
+import (
+	"log"
+	"os"
+	"strconv"
+)
 
 // Schema storage has two modes:
 //
@@ -19,7 +23,26 @@ import "os"
 // Open (like catalogDBName) so tests can flip it with t.Setenv before opening.
 var schemaFilesMode bool
 
-func readSchemaMode() { schemaFilesMode = os.Getenv("OVERLITE_MULTITENANT_SCHEMA") == "true" }
+// readSchemaMode reads OVERLITE_MULTITENANT_SCHEMA.
+//
+// It accepts anything strconv.ParseBool does, not the single spelling "true":
+// setting it to 1, TRUE or yes used to fall back to the single-file default
+// without a word, and the difference is invisible until two tenants are found
+// sharing a file. An unparseable value is reported rather than ignored.
+func readSchemaMode() {
+	v, ok := os.LookupEnv("OVERLITE_MULTITENANT_SCHEMA")
+	if !ok || v == "" {
+		schemaFilesMode = false
+		return
+	}
+	on, err := strconv.ParseBool(v)
+	if err != nil {
+		log.Printf("overlite: OVERLITE_MULTITENANT_SCHEMA=%q is not a boolean; using single-file schemas", v)
+		schemaFilesMode = false
+		return
+	}
+	schemaFilesMode = on
+}
 
 // schemasTableDDL tracks the user schemas in single-file mode (the source of
 // truth for pg_namespace and search_path). Public is implicit and never listed.

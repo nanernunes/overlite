@@ -108,6 +108,11 @@ func metaCatalogViews() []string {
 	}
 }
 
+// maxAttachedSchemas is SQLite's compile-time SQLITE_MAX_ATTACHED, which the
+// driver ships at its default. It bounds how many schemas multi-file mode can
+// hold at once; single-file mode is not affected.
+const maxAttachedSchemas = 10
+
 var reSchemaName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 var reservedSchemas = map[string]bool{
@@ -117,6 +122,22 @@ var reservedSchemas = map[string]bool{
 
 func validSchemaName(name string) bool {
 	return reSchemaName.MatchString(name) && !reservedSchemas[strings.ToLower(name)]
+}
+
+// checkSchemaName rejects a name overlite cannot carry, saying which rule it
+// breaks. A schema name becomes part of a filename in multi-file mode and part
+// of a stored table name in single-file mode, so the character set is narrower
+// than Postgres allows even for a quoted identifier.
+func checkSchemaName(name string) error {
+	if reservedSchemas[strings.ToLower(name)] {
+		return fmt.Errorf("schema name %q is reserved", name)
+	}
+	if !reSchemaName.MatchString(name) {
+		return fmt.Errorf("invalid schema name %q: a schema name must start with a letter "+
+			"or underscore and contain only letters, digits and underscores, because it "+
+			"becomes part of the name of the file or table that stores it", name)
+	}
+	return nil
 }
 
 // mainDBPath extracts the database file path from a DSN like
@@ -352,8 +373,8 @@ func createSchema(ctx context.Context, ce connExecutor, mainPath, name string, i
 		}
 		return fmt.Errorf("schema %q already exists", name)
 	}
-	if !validSchemaName(name) {
-		return fmt.Errorf("invalid schema name %q", name)
+	if err := checkSchemaName(name); err != nil {
+		return err
 	}
 	if !schemaFilesMode {
 		return createSchemaSingle(ctx, ce, mainPath, name, ifNotExists)
@@ -369,6 +390,16 @@ func createSchema(ctx context.Context, ce connExecutor, mainPath, name string, i
 	}
 	path := schemaFilePath(mainPath, name)
 	if _, err := ce.ExecContext(ctx, fmt.Sprintf("ATTACH DATABASE '%s' AS %q", path, name)); err != nil {
+		// Every schema is an attached database here, and SQLite is compiled
+		// with a fixed ceiling on those. Say what the wall is, since the
+		// driver's own message explains neither the cause nor the way out.
+		if strings.Contains(strings.ToLower(err.Error()), "too many attached databases") {
+			return fmt.Errorf("cannot create schema %q: multi-file schema mode keeps every "+
+				"schema in its own database file, and SQLite allows %d attached at once "+
+				"(one is the public schema). Use the default single-file mode "+
+				"(unset OVERLITE_MULTITENANT_SCHEMA), which has no such limit: %w",
+				name, maxAttachedSchemas, err)
+		}
 		return err
 	}
 	return rebuildCatalog(ctx, ce, mainPath)
@@ -557,8 +588,8 @@ func renameSchema(ctx context.Context, ce connExecutor, mainPath, oldName, newNa
 	if strings.EqualFold(oldName, "public") || strings.EqualFold(newName, "public") {
 		return fmt.Errorf("cannot rename schema %q", "public")
 	}
-	if !validSchemaName(newName) {
-		return fmt.Errorf("invalid schema name %q", newName)
+	if err := checkSchemaName(newName); err != nil {
+		return err
 	}
 	if schemaFilesMode {
 		return fmt.Errorf("ALTER SCHEMA ... RENAME is not supported in multi-file schema mode")

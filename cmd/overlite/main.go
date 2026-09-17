@@ -37,6 +37,7 @@ func newRootCmd() *cobra.Command {
 		driver string
 		host   string
 		db     string
+		port   int
 	)
 	cmd := &cobra.Command{
 		Use:   "overlite [db-file]",
@@ -53,7 +54,7 @@ func newRootCmd() *cobra.Command {
 			if len(args) == 1 {
 				db = args[0] // positional wins over --db
 			}
-			return run(driver, host, db)
+			return run(driver, host, db, port)
 		},
 	}
 	// Cobra's default is "overlite version v0.1.0"; the word adds nothing.
@@ -61,12 +62,16 @@ func newRootCmd() *cobra.Command {
 	cmd.Flags().StringVar(&driver, "driver", envOr("OVERLITE_DRIVER", "postgres"),
 		"wire protocol to speak (OVERLITE_DRIVER)")
 	cmd.Flags().StringVar(&host, "host", "127.0.0.1", "listen address")
+	// 0 means "whatever <DRIVER>_PORT or the protocol says", resolved in run
+	// once the driver is known.
+	cmd.Flags().IntVar(&port, "port", 0,
+		"port to listen on (default: the protocol's, or <DRIVER>_PORT)")
 	cmd.Flags().StringVar(&db, "db", "postgres.db",
 		"path to the SQLite file (or :memory:); its name becomes the database name")
 	return cmd
 }
 
-func run(driver, host, db string) error {
+func run(driver, host, db string, port int) error {
 	proto, err := selectDriver(driver)
 	if err != nil {
 		return err
@@ -74,13 +79,15 @@ func run(driver, host, db string) error {
 
 	eng, err := engine.Open(db)
 	if err != nil {
-		return fmt.Errorf("open engine: %w", err)
+		return fmt.Errorf("open engine %s: %w", db, describeDBPath(db, err))
 	}
 	defer eng.Close()
 
-	// The port is the driver's default, overridable via <DRIVER>_PORT
-	// (e.g. POSTGRES_PORT).
-	port := envInt(strings.ToUpper(driver)+"_PORT", proto.DefaultPort())
+	// --port wins; otherwise the driver's default, overridable via
+	// <DRIVER>_PORT (e.g. POSTGRES_PORT).
+	if port == 0 {
+		port = envInt(strings.ToUpper(driver)+"_PORT", proto.DefaultPort())
+	}
 	srv, err := server.New(net.JoinHostPort(host, strconv.Itoa(port)), proto, eng)
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
@@ -164,4 +171,21 @@ func envInt(key string, def int) int {
 		}
 	}
 	return def
+}
+
+// describeDBPath explains the common ways --db is wrong. SQLite reports only
+// "unable to open database file", which says nothing about what to fix.
+func describeDBPath(db string, err error) error {
+	if db == "" || db == ":memory:" {
+		return err
+	}
+	if info, statErr := os.Stat(db); statErr == nil && info.IsDir() {
+		return fmt.Errorf("%s is a directory; --db takes the path to a SQLite file, "+
+			"e.g. --db %s: %w", db, filepath.Join(db, "postgres.db"), err)
+	}
+	dir := filepath.Dir(db)
+	if _, statErr := os.Stat(dir); os.IsNotExist(statErr) {
+		return fmt.Errorf("the directory %s does not exist: %w", dir, err)
+	}
+	return err
 }
