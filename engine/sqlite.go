@@ -326,10 +326,17 @@ func leadingCommand(sql string) string {
 	return fields[0]
 }
 
+// reTableName matches a table name in any quoting combination, including a
+// schema qualifier: `t`, `"t"`, `sales.orders`, `"sales"."orders"`. Matching
+// only a single quoted run used to capture just `"sales"` out of
+// `"sales"."orders"`, and the introspection query built from it asked for a
+// table named after the schema.
+const reTableName = `((?:"[^"]*"|\w+)(?:\s*\.\s*(?:"[^"]*"|\w+))*)`
+
 var (
-	reInsertReturning = regexp.MustCompile(`(?is)^\s*INSERT\s+INTO\s+("[^"]+"|[\w.]+).*?\bRETURNING\b\s+(.+)$`)
-	reUpdateReturning = regexp.MustCompile(`(?is)^\s*UPDATE\s+("[^"]+"|[\w.]+).*?\bRETURNING\b\s+(.+)$`)
-	reDeleteReturning = regexp.MustCompile(`(?is)^\s*DELETE\s+FROM\s+("[^"]+"|[\w.]+).*?\bRETURNING\b\s+(.+)$`)
+	reInsertReturning = regexp.MustCompile(`(?is)^\s*INSERT\s+INTO\s+` + reTableName + `.*?\bRETURNING\b\s+(.+)$`)
+	reUpdateReturning = regexp.MustCompile(`(?is)^\s*UPDATE\s+` + reTableName + `.*?\bRETURNING\b\s+(.+)$`)
+	reDeleteReturning = regexp.MustCompile(`(?is)^\s*DELETE\s+FROM\s+` + reTableName + `.*?\bRETURNING\b\s+(.+)$`)
 )
 
 // introspectionSQL returns a read-only statement whose columns match query's
