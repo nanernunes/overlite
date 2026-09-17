@@ -108,6 +108,19 @@ func metaCatalogViews() []string {
 	}
 }
 
+// setSchemaPragmas puts an attached schema file on the same footing as the main
+// one.
+//
+// The connection string's pragmas only reach the database open with it: an
+// attached file keeps SQLite's default rollback journal, where a writer locks
+// the whole file against every other connection. Every tenant in multi-file
+// mode was paying that — two of them writing at once collapsed to the busy
+// timeout and then raised SQLITE_BUSY.
+func setSchemaPragmas(exec func(string) error, name string) {
+	_ = exec(fmt.Sprintf("PRAGMA %q.journal_mode = WAL", name))
+	_ = exec(fmt.Sprintf("PRAGMA %q.synchronous = NORMAL", name))
+}
+
 // maxAttachedSchemas is SQLite's compile-time SQLITE_MAX_ATTACHED, which the
 // driver ships at its default. It bounds how many schemas multi-file mode can
 // hold at once; single-file mode is not affected.
@@ -210,6 +223,7 @@ func setupConnection(ctx context.Context, exec func(string) error, query func(st
 			for name, path := range discoverSchemaFiles(mainPath) {
 				// Attach if not already attached; ignore "already in use".
 				_ = exec(fmt.Sprintf("ATTACH DATABASE '%s' AS %q", path, name))
+				setSchemaPragmas(exec, name)
 				attached = append(attached, name)
 			}
 		}
@@ -389,7 +403,12 @@ func createSchema(ctx context.Context, ce connExecutor, mainPath, name string, i
 		return fmt.Errorf("schema %q already exists", name)
 	}
 	path := schemaFilePath(mainPath, name)
-	if _, err := ce.ExecContext(ctx, fmt.Sprintf("ATTACH DATABASE '%s' AS %q", path, name)); err != nil {
+	if _, err := ce.ExecContext(ctx, fmt.Sprintf("ATTACH DATABASE '%s' AS %q", path, name)); err == nil {
+		setSchemaPragmas(func(q string) error {
+			_, err := ce.ExecContext(ctx, q)
+			return err
+		}, name)
+	} else {
 		// Every schema is an attached database here, and SQLite is compiled
 		// with a fixed ceiling on those. Say what the wall is, since the
 		// driver's own message explains neither the cause nor the way out.
