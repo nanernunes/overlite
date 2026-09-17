@@ -78,43 +78,78 @@ func splitStoredName(name string) (schema, table string) {
 }
 
 func qualifyOneSchema(sql, schema string) string {
-	low := strings.ToLower(sql)
-	ls := strings.ToLower(schema)
 	var b strings.Builder
 	i := 0
 	for i < len(sql) {
-		switch sql[i] {
-		case '\'':
+		if sql[i] == '\'' {
 			j := skipLiteral(sql, i, '\'')
 			b.WriteString(sql[i:j])
 			i = j
 			continue
-		case '"':
+		}
+		// A qualifier starts at a word boundary. Anything glued to an
+		// identifier byte or a dot belongs to a longer name.
+		if i == 0 || (!isIdentByte(sql[i-1]) && sql[i-1] != '.') {
+			if table, end, ok := matchQualifier(sql, i, schema); ok {
+				b.WriteString(quoteIdent(schema + "." + table))
+				i = end
+				continue
+			}
+		}
+		if sql[i] == '"' {
 			j := skipLiteral(sql, i, '"')
 			b.WriteString(sql[i:j])
 			i = j
 			continue
 		}
-		// A registered schema at a word boundary, immediately followed by ".".
-		if (i == 0 || !isIdentByte(sql[i-1])) && strings.HasPrefix(low[i:], ls) {
-			k := i + len(schema)
-			if k < len(sql) && sql[k] == '.' && (k == len(sql)-1 || sql[k+1] != '.') {
-				t := k + 1
-				start := t
-				for t < len(sql) && isIdentByte(sql[t]) {
-					t++
-				}
-				if t > start {
-					b.WriteString(`"` + sql[i:k] + "." + sql[start:t] + `"`)
-					i = t
-					continue
-				}
-			}
-		}
 		b.WriteByte(sql[i])
 		i++
 	}
 	return b.String()
+}
+
+// matchQualifier reads a `<schema>.<name>` qualifier at i, in any of the four
+// quoting combinations a client may send — `sales.orders`, `"sales".orders`,
+// `sales."orders"`, `"sales"."orders"`. Most ORMs quote both halves, so
+// matching only the bare spelling left them unable to use schemas at all.
+//
+// It returns the unquoted table name and the index just past the qualifier.
+func matchQualifier(sql string, i int, schema string) (table string, end int, ok bool) {
+	name, j, ok := readIdent(sql, i)
+	if !ok || !strings.EqualFold(name, schema) {
+		return "", 0, false
+	}
+	if j >= len(sql) || sql[j] != '.' {
+		return "", 0, false
+	}
+	table, k, ok := readIdent(sql, j+1)
+	if !ok {
+		return "", 0, false // `sales.*` and the like are not a table qualifier
+	}
+	return table, k, true
+}
+
+// readIdent reads one identifier at i, quoted or bare, and returns its value
+// with any quoting removed.
+func readIdent(sql string, i int) (name string, end int, ok bool) {
+	if i >= len(sql) {
+		return "", 0, false
+	}
+	if sql[i] == '"' {
+		j := skipLiteral(sql, i, '"')
+		if j <= i+1 || sql[j-1] != '"' {
+			return "", 0, false // unterminated
+		}
+		return strings.ReplaceAll(sql[i+1:j-1], `""`, `"`), j, true
+	}
+	start := i
+	for i < len(sql) && isIdentByte(sql[i]) {
+		i++
+	}
+	if i == start {
+		return "", 0, false
+	}
+	return sql[start:i], i, true
 }
 
 // skipLiteral returns the index just past a quoted run starting at i (quote q),
