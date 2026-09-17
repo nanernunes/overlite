@@ -178,27 +178,6 @@ func TestAddColumnComputedDefaultOnQualifiedTable(t *testing.T) {
 	assert.Equal(t, "sales", schema)
 }
 
-func TestAddColumnComputedDefaultQualifiedMultiFileMode(t *testing.T) {
-	t.Setenv("OVERLITE_MULTITENANT_SCHEMA", "true")
-	conn := connect(t, startServer(t))
-	ctx := context.Background()
-
-	mustExec(t, conn, `CREATE SCHEMA sales`)
-	mustExec(t, conn, `CREATE TABLE "sales"."orders" (id int primary key, label text)`)
-	mustExec(t, conn, `INSERT INTO "sales"."orders" VALUES (1, 'first')`)
-
-	mustExec(t, conn, `ALTER TABLE "sales"."orders" ADD COLUMN created_at timestamptz DEFAULT now()`)
-
-	var label string
-	require.NoError(t, conn.QueryRow(ctx, `SELECT label FROM "sales"."orders" WHERE id = 1`).Scan(&label))
-	assert.Equal(t, "first", label)
-
-	var schema string
-	require.NoError(t, conn.QueryRow(ctx,
-		`SELECT table_schema FROM information_schema.tables WHERE table_name = 'orders'`).Scan(&schema))
-	assert.Equal(t, "sales", schema, "the table left its schema in the rebuild")
-}
-
 // Rebuilding a table that another one references: SQLite resolves those
 // foreign keys while the table is briefly gone, so the rebuild has to defer
 // enforcement to the end of its transaction.
@@ -219,40 +198,6 @@ func TestAddColumnComputedDefaultOnReferencedTable(t *testing.T) {
 
 	// The foreign key still holds afterwards.
 	_, err := conn.Exec(ctx, `INSERT INTO orders VALUES (11, 999)`)
-	require.Error(t, err, "the foreign key stopped being enforced after the rebuild")
-}
-
-// The same rebuild inside a schema, with an index on the table and another
-// table referencing it: the replayed index has to go back into the schema, not
-// into public, and the foreign key has to survive.
-func TestAddColumnComputedDefaultRebuildsSchemaAuxObjects(t *testing.T) {
-	t.Setenv("OVERLITE_MULTITENANT_SCHEMA", "true")
-	conn := connect(t, startServer(t))
-	ctx := context.Background()
-
-	mustExec(t, conn, `CREATE SCHEMA acme`)
-	mustExec(t, conn, `CREATE TABLE "acme"."users" (id text primary key, email text)`)
-	mustExec(t, conn, `CREATE INDEX "idx_users_email" ON "acme"."users" ("email")`)
-	mustExec(t, conn, `CREATE TABLE "acme"."posts" (
-		id text primary key, user_id text REFERENCES "acme"."users"("id"))`)
-	mustExec(t, conn, `INSERT INTO "acme"."users" VALUES ('u1', 'a@a')`)
-	mustExec(t, conn, `INSERT INTO "acme"."posts" VALUES ('p1', 'u1')`)
-
-	mustExec(t, conn, `ALTER TABLE "acme"."users" ADD COLUMN created_at timestamptz DEFAULT now()`)
-
-	// The data survived.
-	var email string
-	require.NoError(t, conn.QueryRow(ctx, `SELECT email FROM "acme"."users" WHERE id = 'u1'`).Scan(&email))
-	assert.Equal(t, "a@a", email)
-
-	// The index went back into the schema, not into public.
-	var schema string
-	require.NoError(t, conn.QueryRow(ctx,
-		`SELECT schemaname FROM pg_indexes WHERE indexname = 'idx_users_email'`).Scan(&schema))
-	assert.Equal(t, "acme", schema)
-
-	// And the foreign key is still enforced.
-	_, err := conn.Exec(ctx, `INSERT INTO "acme"."posts" VALUES ('p2', 'nobody')`)
 	require.Error(t, err, "the foreign key stopped being enforced after the rebuild")
 }
 

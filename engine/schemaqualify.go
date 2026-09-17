@@ -33,10 +33,10 @@ func cachedSchemas() []string {
 }
 
 // qualifySchemaNames rewrites `<schema>.<name>` → `"<schema>.<name>"` for every
-// registered schema, outside string/identifier literals. A no-op in multi-file
-// mode or when no schema is registered.
+// registered schema, outside string/identifier literals. A no-op when no schema
+// is registered.
 func qualifySchemaNames(query string) string {
-	if schemaFilesMode || !strings.Contains(query, ".") {
+	if !strings.Contains(query, ".") {
 		return query
 	}
 	schemas := cachedSchemas()

@@ -40,9 +40,8 @@ const maxConnections = 100
 func Open(path string) (*SQLite, error) {
 	registerCatalog()
 	// Set before the first connection: the catalog is built in a connection
-	// hook that reads catalogDBName and schemaFilesMode.
+	// hook that reads catalogDBName.
 	catalogDBName = dbNameFromPath(path)
-	readSchemaMode()
 	dsn := buildDSN(path)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -159,11 +158,6 @@ func execute(ctx context.Context, q querier, query string, args []core.Value) (*
 	query = resolveCurrentSchema(ctx, q, query)
 	query = resolveToRegclass(query)
 	query = rewriteSQLFunctions(query)
-	query = rewriteMultiFileIndex(query)
-	query, err := rewriteMultiFileReferences(query)
-	if err != nil {
-		return nil, err
-	}
 	cmd := leadingCommand(query)
 	if isQuery(query) {
 		return doQuery(ctx, q, query, args, cmd)

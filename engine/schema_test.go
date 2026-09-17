@@ -10,21 +10,17 @@ import (
 )
 
 func TestSchemaLifecycle(t *testing.T) {
-	t.Setenv("OVERLITE_MULTITENANT_SCHEMA", "true") // this test asserts the file-per-schema layout
 	dir := t.TempDir()
 	main := filepath.Join(dir, "system.db")
-	vendasFile := filepath.Join(dir, "system.vendas.db")
 	ctx := context.Background()
 
 	eng, err := Open(main)
 	require.NoError(t, err)
 	t.Cleanup(func() { eng.Close() })
 
-	// CREATE SCHEMA creates and attaches a sibling file.
 	require.NoError(t, eng.CreateSchema(ctx, "vendas", false))
-	assert.FileExists(t, vendasFile)
 
-	// A table created in the schema lives in that file and is queryable.
+	// A table created in the schema is queryable through it.
 	mustExec(t, eng, `CREATE TABLE vendas.pedidos (id INTEGER PRIMARY KEY, total REAL)`)
 	mustExec(t, eng, `INSERT INTO vendas.pedidos (total) VALUES (9.9)`)
 	sel, err := eng.Execute(ctx, `SELECT total FROM vendas.pedidos`, nil)
@@ -53,7 +49,11 @@ func TestSchemaLifecycle(t *testing.T) {
 	// DROP SCHEMA without cascade refuses a non-empty schema.
 	require.Error(t, eng.DropSchema(ctx, "vendas", false, false))
 	require.NoError(t, eng.DropSchema(ctx, "vendas", false, true))
-	assert.NoFileExists(t, vendasFile)
+
+	// And it is gone from the catalog.
+	gone, err := eng.Execute(ctx, `SELECT count(*) FROM pg_namespace WHERE nspname = 'vendas'`, nil)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), gone.Rows[0][0])
 }
 
 func TestSchemaPersistsAcrossReopen(t *testing.T) {
@@ -82,7 +82,6 @@ func TestSchemaPersistsAcrossReopen(t *testing.T) {
 }
 
 func TestSchemaDiscoveryMultiple(t *testing.T) {
-	t.Setenv("OVERLITE_MULTITENANT_SCHEMA", "true") // file-per-schema discovery
 	dir := t.TempDir()
 	main := filepath.Join(dir, "hello.db")
 	ctx := context.Background()
@@ -97,13 +96,7 @@ func TestSchemaDiscoveryMultiple(t *testing.T) {
 	}
 	eng.Close()
 
-	// The sibling files exist on disk.
-	for _, s := range []string{"bla", "ble", "vendas"} {
-		assert.FileExists(t, filepath.Join(dir, "hello."+s+".db"))
-	}
-
-	// Second run: a fresh engine pointed only at hello.db must auto-discover
-	// and attach ALL sibling schema files.
+	// Second run: a fresh engine must find every schema again.
 	eng2, err := Open(main)
 	require.NoError(t, err)
 	t.Cleanup(func() { eng2.Close() })

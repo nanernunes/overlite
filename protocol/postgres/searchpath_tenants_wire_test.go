@@ -2,22 +2,18 @@ package postgres_test
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// In multi-file mode a schema is an attached database. search_path used to be
-// ignored there, so an unqualified name fell through to SQLite, which resolves
-// it by attach order: every session read and wrote whichever tenant happened to
-// be attached first, whatever its search_path said. Two tenants with the same
-// table name shared one table.
-
-// TestSearchPathIsolatesTenantsInMultiFileMode is the regression that matters:
-// a leak here mixes one customer's rows into another's.
-func TestSearchPathIsolatesTenantsInMultiFileMode(t *testing.T) {
-	t.Setenv("OVERLITE_MULTITENANT_SCHEMA", "true")
+// Two tenants holding a table of the same name must not end up sharing one.
+// This is the regression that matters: a leak here mixes one customer's rows
+// into another's, with no error to notice.
+func TestSearchPathIsolatesTenants(t *testing.T) {
 	addr := startServer(t)
 	ctx := context.Background()
 
@@ -60,8 +56,7 @@ func TestSearchPathIsolatesTenantsInMultiFileMode(t *testing.T) {
 }
 
 // A path-qualified CREATE lands in the path's first schema, not in public.
-func TestSearchPathCreateInMultiFileMode(t *testing.T) {
-	t.Setenv("OVERLITE_MULTITENANT_SCHEMA", "true")
+func TestSearchPathCreate(t *testing.T) {
 	addr := startServer(t)
 	ctx := context.Background()
 
@@ -85,8 +80,7 @@ func TestSearchPathCreateInMultiFileMode(t *testing.T) {
 }
 
 // An unqualified name still finds a public table when no path schema has one.
-func TestSearchPathFallsBackToPublicInMultiFileMode(t *testing.T) {
-	t.Setenv("OVERLITE_MULTITENANT_SCHEMA", "true")
+func TestSearchPathFallsBackToPublic(t *testing.T) {
 	addr := startServer(t)
 	ctx := context.Background()
 
@@ -99,4 +93,45 @@ func TestSearchPathFallsBackToPublicInMultiFileMode(t *testing.T) {
 	var id int
 	require.NoError(t, conn.QueryRow(ctx, `SELECT id FROM shared`).Scan(&id))
 	assert.Equal(t, 7, id)
+}
+
+// Two tenants writing at the same time must not fail on each other.
+func TestConcurrentTenantWrites(t *testing.T) {
+	addr := startServer(t)
+	ctx := context.Background()
+
+	setup := connect(t, addr)
+	for _, s := range []string{"acme", "globex"} {
+		mustExec(t, setup, `CREATE SCHEMA `+s)
+		mustExec(t, setup, fmt.Sprintf(`CREATE TABLE %s.t (id integer primary key autoincrement, v text)`, s))
+	}
+
+	const perTenant = 40
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	for _, s := range []string{"acme", "globex"} {
+		wg.Add(1)
+		go func(schema string) {
+			defer wg.Done()
+			c := connect(t, addr)
+			for i := 0; i < perTenant; i++ {
+				if _, err := c.Exec(ctx,
+					fmt.Sprintf(`INSERT INTO %s.t (v) VALUES ($1)`, schema), "x"); err != nil {
+					errs <- err
+					return
+				}
+			}
+		}(s)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("a tenant's write failed while another was writing: %v", err)
+	}
+
+	for _, s := range []string{"acme", "globex"} {
+		var n int
+		require.NoError(t, setup.QueryRow(ctx, fmt.Sprintf(`SELECT count(*) FROM %s.t`, s)).Scan(&n))
+		assert.Equalf(t, perTenant, n, "%s lost writes", s)
+	}
 }

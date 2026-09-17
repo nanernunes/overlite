@@ -35,17 +35,3 @@ func TestReturningOnQualifiedTable(t *testing.T) {
 		`DELETE FROM "sales"."orders" WHERE id = $1 RETURNING id`, id).Scan(&deleted))
 	assert.Equal(t, id, deleted)
 }
-
-func TestReturningOnQualifiedTableMultiFileMode(t *testing.T) {
-	t.Setenv("OVERLITE_MULTITENANT_SCHEMA", "true")
-	conn := connectExtended(t, startServer(t))
-	ctx := context.Background()
-
-	mustExec(t, conn, `CREATE SCHEMA sales`)
-	mustExec(t, conn, `CREATE TABLE "sales"."orders" (id int primary key, total int)`)
-
-	var id int
-	require.NoError(t, conn.QueryRow(ctx,
-		`INSERT INTO "sales"."orders" VALUES ($1, $2) RETURNING id`, 1, 10).Scan(&id))
-	assert.Equal(t, 1, id)
-}

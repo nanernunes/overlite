@@ -13,11 +13,6 @@ import (
 // that actually has that table (an existence check, so a bare public name is
 // never rewritten by mistake); for CREATE TABLE it goes to the first path
 // schema, where Postgres creates it.
-//
-// Both storage modes need this. In multi-file mode a schema is an attached
-// database, and leaving an unqualified name alone let SQLite resolve it by
-// attach order instead: every session read and wrote whichever tenant happened
-// to be attached first, no matter what its search_path said.
 
 func searchPathFrom(ctx context.Context) []string {
 	sp, _ := ctx.Value(core.SearchPathKey).([]string)
@@ -130,26 +125,17 @@ func resolveTableName(ctx context.Context, q querier, name string, path []string
 	return "", false
 }
 
-// qualifyFor renders a schema-qualified name the way the current storage mode
-// stores it: one identifier holding both parts in single-file mode, an
-// attached-database qualifier in multi-file mode.
+// qualifyFor renders a schema-qualified name the way it is stored: one
+// identifier holding both parts.
 func qualifyFor(schema, name string) string {
-	if schemaFilesMode {
-		return `"` + schema + `"."` + name + `"`
-	}
 	return `"` + schema + "." + name + `"`
 }
 
 // schemaHasTable reports whether schema holds a table or view called name.
 func schemaHasTable(ctx context.Context, q querier, schema, name string) bool {
-	// Schema names are validated against ^[A-Za-z_]\w*$ before they are
-	// registered, so the attached-database qualifier is safe to interpolate.
-	master, lookup := "main.sqlite_master", schema+"."+name
-	if schemaFilesMode {
-		master, lookup = `"`+schema+`".sqlite_master`, name
-	}
 	rows, err := q.QueryContext(ctx,
-		"SELECT 1 FROM "+master+" WHERE type IN ('table','view') AND name = ? LIMIT 1", lookup)
+		"SELECT 1 FROM main.sqlite_master WHERE type IN ('table','view') AND name = ? LIMIT 1",
+		schema+"."+name)
 	if err != nil {
 		return false
 	}
