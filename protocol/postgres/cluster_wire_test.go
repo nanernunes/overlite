@@ -3,7 +3,6 @@ package postgres_test
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -61,12 +60,12 @@ func TestDatabasePerFile(t *testing.T) {
 	addr, dir := startCluster(t, 8)
 	ctx := context.Background()
 
-	admin := dialDB(t, addr, "postgres")
-	require.Nil(t, admin, "connecting to a database that does not exist should fail")
+	// The maintenance database is always there to connect to.
+	admin := dialDB(t, addr, engine.MaintenanceDatabase)
+	require.NotNil(t, admin)
 
-	// Create two, then use them.
-	first := mustCreateDatabase(t, addr, dir, "acme")
-	second := mustCreateDatabase(t, addr, dir, "globex")
+	first := mustCreateDatabase(t, addr, admin, "acme")
+	second := mustCreateDatabase(t, addr, admin, "globex")
 
 	mustExec(t, first, `CREATE TABLE incidents (id int primary key, title text)`)
 	mustExec(t, first, `INSERT INTO incidents VALUES (1, 'acme incident')`)
@@ -96,19 +95,11 @@ func TestDatabasePerFile(t *testing.T) {
 	assert.Error(t, err, "a query reached into another database")
 }
 
-func mustCreateDatabase(t *testing.T, addr, dir, name string) *pgx.Conn {
+// mustCreateDatabase creates a database through an open connection and returns
+// a connection to it.
+func mustCreateDatabase(t *testing.T, addr string, admin *pgx.Conn, name string) *pgx.Conn {
 	t.Helper()
-	// Any existing database can host the CREATE; the first one bootstraps from
-	// a database created on disk by the cluster itself.
-	if _, err := os.Stat(filepath.Join(dir, "bootstrap.db")); os.IsNotExist(err) {
-		cluster, err := engine.OpenDir(dir, 8)
-		require.NoError(t, err)
-		require.NoError(t, cluster.CreateDatabase(context.Background(), "bootstrap"))
-		cluster.Close()
-	}
-	boot := dialDB(t, addr, "bootstrap")
-	require.NotNil(t, boot)
-	mustExec(t, boot, `CREATE DATABASE `+name)
+	mustExec(t, admin, `CREATE DATABASE `+name)
 	conn := dialDB(t, addr, name)
 	require.NotNilf(t, conn, "could not connect to the database just created: %s", name)
 	return conn
@@ -117,11 +108,10 @@ func mustCreateDatabase(t *testing.T, addr, dir, name string) *pgx.Conn {
 // Asking for a database this server does not hold is an error naming what it
 // does hold — not a silent landing on whichever database happens to be here.
 func TestUnknownDatabaseIsRefused(t *testing.T) {
-	addr, dir := startCluster(t, 8)
-	cluster, err := engine.OpenDir(dir, 8)
-	require.NoError(t, err)
-	require.NoError(t, cluster.CreateDatabase(context.Background(), "shop"))
-	cluster.Close()
+	addr, _ := startCluster(t, 8)
+	admin := dialDB(t, addr, engine.MaintenanceDatabase)
+	require.NotNil(t, admin)
+	mustExec(t, admin, `CREATE DATABASE shop`)
 
 	cfg, err := pgx.ParseConfig(fmt.Sprintf("postgres://overlite@%s/nope?sslmode=disable", addr))
 	require.NoError(t, err)
@@ -139,10 +129,11 @@ func TestCreateAndDropDatabase(t *testing.T) {
 	addr, dir := startCluster(t, 8)
 	ctx := context.Background()
 
-	conn := mustCreateDatabase(t, addr, dir, "tenant_a")
+	boot := dialDB(t, addr, engine.MaintenanceDatabase)
+	require.NotNil(t, boot)
+	conn := mustCreateDatabase(t, addr, boot, "tenant_a")
 
 	// pg_database lists what the server holds.
-	boot := dialDB(t, addr, "bootstrap")
 	names := func() []string {
 		rows, err := boot.Query(ctx, `SELECT datname FROM pg_database ORDER BY datname`)
 		require.NoError(t, err)
@@ -155,7 +146,7 @@ func TestCreateAndDropDatabase(t *testing.T) {
 		}
 		return out
 	}
-	assert.Equal(t, []string{"bootstrap", "tenant_a"}, names())
+	assert.Equal(t, []string{"postgres", "tenant_a"}, names())
 
 	// Creating one that exists is an error; IF NOT EXISTS is not.
 	_, err := boot.Exec(ctx, `CREATE DATABASE tenant_a`)
@@ -176,7 +167,7 @@ func TestCreateAndDropDatabase(t *testing.T) {
 		return err == nil
 	}, 3*time.Second, 50*time.Millisecond)
 
-	assert.Equal(t, []string{"bootstrap"}, names())
+	assert.Equal(t, []string{"postgres"}, names())
 	assert.NoFileExists(t, filepath.Join(dir, "tenant_a.db"))
 
 	// And it is gone for a client too.
@@ -187,15 +178,15 @@ func TestCreateAndDropDatabase(t *testing.T) {
 // idle ones are closed and reopened on demand.
 func TestMoreDatabasesThanStayOpen(t *testing.T) {
 	const total, maxOpen = 12, 3
-	addr, dir := startCluster(t, maxOpen)
+	addr, _ := startCluster(t, maxOpen)
 	ctx := context.Background()
 
-	cluster, err := engine.OpenDir(dir, maxOpen)
-	require.NoError(t, err)
+	admin := dialDB(t, addr, engine.MaintenanceDatabase)
+	require.NotNil(t, admin)
 	for i := 0; i < total; i++ {
-		require.NoError(t, cluster.CreateDatabase(ctx, fmt.Sprintf("t%02d", i)))
+		mustExec(t, admin, fmt.Sprintf(`CREATE DATABASE t%02d`, i))
 	}
-	cluster.Close()
+	admin.Close(ctx)
 
 	// Write to each in turn, which forces eviction and reopening.
 	for i := 0; i < total; i++ {

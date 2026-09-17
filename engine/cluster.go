@@ -75,6 +75,11 @@ type openDB struct {
 // latency of reopening a database that went cold.
 const DefaultMaxOpenDatabases = 64
 
+// MaintenanceDatabase always exists, as it does in PostgreSQL. A client has to
+// connect to some database before it can create one, and tools default to this
+// name, so an empty directory would otherwise have nothing to connect to.
+const MaintenanceDatabase = "postgres"
+
 // OpenDir serves the databases in dir. It is created if it does not exist.
 func OpenDir(dir string, maxOpen int) (*Dir, error) {
 	if maxOpen <= 0 {
@@ -83,7 +88,13 @@ func OpenDir(dir string, maxOpen int) (*Dir, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("create database directory %s: %w", dir, err)
 	}
-	return &Dir{dir: dir, maxOpen: maxOpen, open: map[string]*openDB{}}, nil
+	d := &Dir{dir: dir, maxOpen: maxOpen, open: map[string]*openDB{}}
+	if !d.exists(MaintenanceDatabase) {
+		if err := d.CreateDatabase(context.Background(), MaintenanceDatabase); err != nil {
+			return nil, err
+		}
+	}
+	return d, nil
 }
 
 func (d *Dir) path(name string) string { return filepath.Join(d.dir, name+".db") }
@@ -199,6 +210,9 @@ func (d *Dir) CreateDatabase(ctx context.Context, database string) error {
 
 // DropDatabase closes the database and deletes its files.
 func (d *Dir) DropDatabase(_ context.Context, database string) error {
+	if database == MaintenanceDatabase {
+		return fmt.Errorf("cannot drop the maintenance database %q", MaintenanceDatabase)
+	}
 	if !d.exists(database) {
 		return fmt.Errorf("database %q does not exist", database)
 	}
