@@ -93,3 +93,42 @@ func TestTimestampRoundTripsThroughGo(t *testing.T) {
 	require.NoError(t, conn.QueryRow(ctx, `SELECT ts FROM t`).Scan(&got))
 	assert.True(t, want.Equal(got), "got %v, want %v", got, want)
 }
+
+// A column's type is what a client reads to decide how to parse its values, so
+// timestamptz and timestamp have to be told apart: the catalog reported both as
+// "timestamp without time zone" while the wire announced timestamptz for one of
+// them, leaving a tool to parse an offset it had been told would not be there.
+func TestTimestamptzIsItsOwnType(t *testing.T) {
+	addr := startServer(t)
+	conn := connect(t, addr)
+	ctx := context.Background()
+
+	mustExec(t, conn, `CREATE TABLE t (withzone timestamptz, without timestamp, d date)`)
+
+	types := func(column string) (dataType, udtName string) {
+		require.NoError(t, conn.QueryRow(ctx, `
+			SELECT data_type, udt_name FROM information_schema.columns
+			WHERE table_name = 't' AND column_name = $1`, column).Scan(&dataType, &udtName))
+		return
+	}
+
+	dt, udt := types("withzone")
+	assert.Equal(t, "timestamp with time zone", dt)
+	assert.Equal(t, "timestamptz", udt)
+
+	dt, udt = types("without")
+	assert.Equal(t, "timestamp without time zone", dt)
+	assert.Equal(t, "timestamp", udt)
+
+	dt, _ = types("d")
+	assert.Equal(t, "date", dt)
+
+	// And the type the catalog reports is the one the wire announces.
+	rows, err := conn.Query(ctx, `SELECT withzone, without FROM t`)
+	require.NoError(t, err)
+	fds := rows.FieldDescriptions()
+	require.Len(t, fds, 2)
+	assert.Equal(t, uint32(1184), fds[0].DataTypeOID, "timestamptz column")
+	assert.Equal(t, uint32(1114), fds[1].DataTypeOID, "timestamp column")
+	rows.Close()
+}

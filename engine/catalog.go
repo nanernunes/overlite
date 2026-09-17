@@ -580,18 +580,19 @@ var registerCatalog = sync.OnceFunc(func() {
 
 // Postgres type OIDs used by the emulated pg_type / atttypid mapping.
 const (
-	typeOIDBool      = 16
-	typeOIDBytea     = 17
-	typeOIDInt8      = 20
-	typeOIDInt4      = 23
-	typeOIDText      = 25
-	typeOIDFloat8    = 701
-	typeOIDNumeric   = 1700
-	typeOIDDate      = 1082
-	typeOIDTimestamp = 1114
-	typeOIDJSON      = 114
-	typeOIDJSONB     = 3802
-	typeOIDUUID      = 2950
+	typeOIDBool        = 16
+	typeOIDBytea       = 17
+	typeOIDInt8        = 20
+	typeOIDInt4        = 23
+	typeOIDText        = 25
+	typeOIDFloat8      = 701
+	typeOIDNumeric     = 1700
+	typeOIDDate        = 1082
+	typeOIDTimestamp   = 1114
+	typeOIDTimestamptz = 1184
+	typeOIDJSON        = 114
+	typeOIDJSONB       = 3802
+	typeOIDUUID        = 2950
 )
 
 // sqliteTypeOID maps a SQLite declared type to a Postgres type OID using
@@ -619,6 +620,10 @@ func sqliteTypeOID(decl string) int64 {
 		return typeOIDBool
 	case strings.Contains(d, "NUMERIC"), strings.Contains(d, "DEC"):
 		return typeOIDNumeric
+	// TIMESTAMPTZ carries a zone; TIMESTAMP does not. They are different types
+	// to a client, which reads the column's type to decide how to parse it.
+	case strings.Contains(d, "TIMESTAMPTZ"), strings.Contains(d, "TIMESTAMP WITH TIME ZONE"):
+		return typeOIDTimestamptz
 	case strings.Contains(d, "TIMESTAMP"), strings.Contains(d, "DATETIME"):
 		return typeOIDTimestamp
 	case strings.Contains(d, "DATE"):
@@ -652,6 +657,8 @@ func formatTypeName(oid int64) string {
 		return "date"
 	case typeOIDTimestamp:
 		return "timestamp without time zone"
+	case typeOIDTimestamptz:
+		return "timestamp with time zone"
 	case typeOIDJSON:
 		return "json"
 	case typeOIDJSONB:
@@ -740,6 +747,7 @@ var staticCatalogViews = []string{
 	 UNION ALL SELECT 1043, 'varchar',   11, 10, 'b', 'S', -1, 0, 0, 0, 1015, 0, 0, -1, 0, 100, NULL, ','
 	 UNION ALL SELECT 1082, 'date',      11, 10, 'b', 'D', 4,  1, 0, 0, 1182, 0, 0, -1, 0, 0, NULL, ','
 	 UNION ALL SELECT 1114, 'timestamp', 11, 10, 'b', 'D', 8,  1, 0, 0, 1115, 0, 0, -1, 0, 0, NULL, ','
+	 UNION ALL SELECT 1184, 'timestamptz',11, 10, 'b', 'D', 8,  1, 0, 0, 1185, 0, 0, -1, 0, 0, NULL, ','
 	 UNION ALL SELECT 1700, 'numeric',   11, 10, 'b', 'N', -1, 0, 0, 0, 1231, 0, 0, -1, 0, 0, NULL, ','
 	 UNION ALL SELECT 114,  'json',      11, 10, 'b', 'U', -1, 0, 0, 0, 199,  0, 0, -1, 0, 0, NULL, ','
 	 UNION ALL SELECT 3802, 'jsonb',     11, 10, 'b', 'U', -1, 0, 0, 0, 3807, 0, 0, -1, 0, 0, NULL, ','
