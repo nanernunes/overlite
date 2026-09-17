@@ -27,6 +27,8 @@ func rewrite(sql string) string {
 	sql = rewriteJSONPath(sql)
 	sql = rewriteEscapeStrings(sql)
 	sql = rewriteNiladicFuncs(sql)
+	// After the function rewrites, so the final expression is what gets wrapped.
+	sql = rewriteDefaultExpr(sql)
 	sql = rewriteInformationSchema(sql)
 	sql = rewriteObjDescription(sql)        // obj_description/col_description -> pg_description lookup
 	sql = rewriteIndexUsing(sql)            // strip "USING <method>" from CREATE INDEX (pg_dump emits it)
@@ -54,6 +56,8 @@ func rewrite(sql string) string {
 	sql = rewriteCollate(sql)
 	sql = rewriteTrimFrom(sql)
 	sql = rewriteMatchOperators(sql)
+	sql = rewriteILike(sql)
+	sql = rewriteRowLock(sql)
 	return sql
 }
 

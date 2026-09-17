@@ -21,6 +21,7 @@ func frag(tmpl string, r schemaRef) string {
 		// displayed relation names; it's 1 (a no-op, substr(name,1)=name) for
 		// public and for multi-file schemas.
 		"@PLEN@", strconv.Itoa(len(r.Prefix)+1),
+		"@ROLE@", sqlQuote(catalogRole),
 	).Replace(tmpl)
 }
 
@@ -89,6 +90,9 @@ func dynamicCatalogViews(refs []schemaRef) []string {
 		union(`"information_schema.referential_constraints"`, refs, infoReferentialConstraintsTmpl),
 		union(`"information_schema.constraint_column_usage"`, refs, infoConstraintColumnUsageTmpl),
 		union(`"information_schema.views"`, refs, infoViewsTmpl),
+		union("pg_tables", refs, pgTablesTmpl),
+		union("pg_indexes", refs, pgIndexesTmpl),
+		union("pg_views", refs, pgViewsTmpl),
 		infoSchemataView(refs),
 		infoSequencesView(),
 		infoCheckConstraintsView(),
@@ -301,6 +305,26 @@ const infoTablesTmpl = `SELECT 'main' AS table_catalog, '@PG@' AS table_schema, 
  CASE type WHEN 'view' THEN 'VIEW' ELSE 'BASE TABLE' END AS table_type
 FROM @MASTER@ WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%' AND name NOT GLOB '_overlite_*'`
 
+// pg_tables / pg_indexes / pg_views are the readable summaries psql, ORMs and
+// migration tools reach for far more often than the underlying pg_class joins.
+const pgTablesTmpl = `SELECT '@PG@' AS schemaname, substr(m.name,@PLEN@) AS tablename,
+ @ROLE@ AS tableowner, NULL AS tablespace,
+ EXISTS(SELECT 1 FROM @MASTER@ AS i WHERE i.type='index' AND i.tbl_name=m.name) AS hasindexes,
+ 0 AS hasrules,
+ EXISTS(SELECT 1 FROM @MASTER@ AS tg WHERE tg.type='trigger' AND tg.tbl_name=m.name) AS hastriggers,
+ 0 AS rowsecurity
+FROM @MASTER@ AS m
+WHERE m.type='table' AND m.name NOT LIKE 'sqlite_%' AND m.name NOT GLOB '_overlite_*'`
+
+const pgIndexesTmpl = `SELECT '@PG@' AS schemaname, substr(tbl_name,@PLEN@) AS tablename,
+ substr(name,@PLEN@) AS indexname, NULL AS tablespace, sql AS indexdef
+FROM @MASTER@ WHERE type='index' AND name NOT LIKE 'sqlite_%' AND name NOT GLOB '_overlite_*'
+ AND sql IS NOT NULL`
+
+const pgViewsTmpl = `SELECT '@PG@' AS schemaname, substr(name,@PLEN@) AS viewname,
+ @ROLE@ AS viewowner, sql AS definition
+FROM @MASTER@ WHERE type='view' AND name NOT LIKE 'sqlite_%' AND name NOT GLOB '_overlite_*'`
+
 const infoColumnsTmpl = `SELECT 'main' AS table_catalog, '@PG@' AS table_schema, substr(m.name,@PLEN@) AS table_name,
  ti.name AS column_name, ti.cid + 1 AS ordinal_position, ti.dflt_value AS column_default,
  CASE WHEN ti."notnull"=1 OR ti.pk>0 THEN 'NO' ELSE 'YES' END AS is_nullable,
@@ -314,7 +338,11 @@ const infoColumnsTmpl = `SELECT 'main' AS table_catalog, '@PG@' AS table_schema,
  format_type(overlite_type_oid(ti.type), NULL) AS udt_name,
  NULL AS collation_name, NULL AS domain_catalog, NULL AS domain_schema, NULL AS domain_name,
  ti.cid + 1 AS dtd_identifier, 'NO' AS is_identity, 'NO' AS is_generated,
- 'NEVER' AS identity_generation, 'YES' AS is_updatable
+ 'NEVER' AS identity_generation, 'YES' AS is_updatable,
+ NULL AS identity_start, NULL AS identity_increment, NULL AS identity_maximum,
+ NULL AS identity_minimum, NULL AS identity_cycle, NULL AS generation_expression,
+ NULL AS interval_type, NULL AS interval_precision, NULL AS scope_catalog,
+ NULL AS scope_schema, NULL AS scope_name, NULL AS maximum_cardinality
 FROM @MASTER@ m JOIN pragma_table_info(m.name,'@DB@') ti
 WHERE m.type='table' AND m.name NOT LIKE 'sqlite_%' AND m.name NOT GLOB '_overlite_*'`
 

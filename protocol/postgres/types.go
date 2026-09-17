@@ -111,6 +111,8 @@ var boolCatalogColumns = map[string]bool{
 	"notnull_islocal": true, "notnull_noinherit": true, "notnull_invalidoid": true,
 	// A sequence read as a relation: is_called is boolean.
 	"is_called": true,
+	// pg_tables / pg_indexes summaries.
+	"hasindexes": true, "hasrules": true, "hastriggers": true, "rowsecurity": true,
 }
 
 // oidForColumn picks an OID for a column. SQLite is dynamically typed, so we

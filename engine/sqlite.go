@@ -157,6 +157,7 @@ func execute(ctx context.Context, q querier, query string, args []core.Value) (*
 	query = resolveSearchPath(ctx, q, query)
 	query = stripPublicQualifier(query)
 	query = resolveCurrentSchema(ctx, q, query)
+	query = resolveToRegclass(query)
 	query = rewriteSQLFunctions(query)
 	cmd := leadingCommand(query)
 	if isQuery(query) {
@@ -249,6 +250,7 @@ func describe(ctx context.Context, q querier, query string, args []core.Value) (
 	query = resolveSearchPath(ctx, q, query)
 	query = stripPublicQualifier(query)
 	query = resolveCurrentSchema(ctx, q, query)
+	query = resolveToRegclass(query)
 	query = rewriteSQLFunctions(query)
 	introSQL, ok := introspectionSQL(query)
 	if !ok {

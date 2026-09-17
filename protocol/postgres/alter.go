@@ -54,6 +54,9 @@ func (s *session) tryAlterTable(sql string) (string, bool, error) {
 		if hasWord(rest, "unique") && !hasWord(rest, "primary") {
 			return "ALTER TABLE", true, s.alterAddUnique(sql, table)
 		}
+		if def, ok := addColumnComputedDefault(sql); ok {
+			return "ALTER TABLE", true, s.alterAddColumnDefault(table, def)
+		}
 	case "ALTER":
 		return "ALTER TABLE", true, s.alterColumn(sql, table, rest[1:])
 	case "SET":
@@ -95,6 +98,9 @@ func alterTableHandled(sql string) bool {
 	switch strings.ToUpper(rest[0]) {
 	case "ADD":
 		if hasWord(rest, "unique") && !hasWord(rest, "primary") {
+			return true
+		}
+		if _, ok := addColumnComputedDefault(sql); ok {
 			return true
 		}
 		_, ok := parseAddConstraint(sql)
@@ -261,9 +267,26 @@ func (s *session) auxDDL(table string) []string {
 // rebuildTable replaces table with newDDL (same column set) via create-copy-swap
 // inside a savepoint, recreating its indexes and triggers.
 func (s *session) rebuildTable(table, newDDL string) error {
+	return s.rebuildTableCopying(table, newDDL, nil)
+}
+
+// rebuildTableCopying is rebuildTable for a DDL whose column set differs from
+// the current one: copy names the columns to carry over, and any column of the
+// new table missing from it takes its default.
+func (s *session) rebuildTableCopying(table, newDDL string, copy []string) error {
 	aux := s.auxDDL(table)
 	const tmp = "_overlite_rebuild"
 	tmpDDL := renameCreateTable(newDDL, tmp)
+
+	copyStep := "INSERT INTO " + qIdent(tmp) + " SELECT * FROM " + qIdent(table)
+	if len(copy) > 0 {
+		quoted := make([]string, len(copy))
+		for i, c := range copy {
+			quoted[i] = qIdent(c)
+		}
+		list := strings.Join(quoted, ", ")
+		copyStep = "INSERT INTO " + qIdent(tmp) + " (" + list + ") SELECT " + list + " FROM " + qIdent(table)
+	}
 
 	if _, err := s.exec("SAVEPOINT _rb", nil); err != nil {
 		return err
@@ -275,7 +298,7 @@ func (s *session) rebuildTable(table, newDDL string) error {
 	}
 	steps := []string{
 		tmpDDL,
-		"INSERT INTO " + qIdent(tmp) + " SELECT * FROM " + qIdent(table),
+		copyStep,
 		"DROP TABLE " + qIdent(table),
 		"ALTER TABLE " + qIdent(tmp) + " RENAME TO " + qIdent(table),
 	}
@@ -568,4 +591,112 @@ func insertTableConstraint(ddl, clause string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// --- ADD COLUMN with a computed default ---------------------------------------
+
+// SQLite refuses `ALTER TABLE … ADD COLUMN … DEFAULT <expr>` for anything it
+// cannot evaluate to a constant, because it would have to compute the value for
+// every existing row. Postgres allows it, and migrations lean on it heavily
+// (`ADD COLUMN created_at timestamptz DEFAULT now()`), so it is implemented the
+// way SQLite's own documentation recommends changing a table: rebuild it with
+// the column in the CREATE TABLE, where a computed default is accepted.
+
+// addColumnComputedDefault returns the column definition of an
+// `ADD COLUMN … DEFAULT <call>`, and whether the statement is one.
+func addColumnComputedDefault(sql string) (def string, ok bool) {
+	low := strings.ToLower(sql)
+	i := indexWord(low, "add")
+	if i < 0 {
+		return "", false
+	}
+	rest := strings.TrimSpace(sql[i+len("add"):])
+	if strings.EqualFold(firstWordUpper(rest), "COLUMN") {
+		rest = strings.TrimSpace(rest[len("column"):])
+	}
+	if strings.EqualFold(firstWordUpper(rest), "IF") { // IF NOT EXISTS
+		f := strings.Fields(rest)
+		if len(f) >= 3 && strings.EqualFold(f[1], "not") && strings.EqualFold(f[2], "exists") {
+			rest = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(
+				strings.TrimPrefix(strings.TrimSpace(strings.TrimPrefix(rest, f[0])), f[1])), f[2]))
+		}
+	}
+	rest = strings.TrimSuffix(strings.TrimSpace(rest), ";")
+
+	// Only the computed form needs the rebuild; a constant default is fine as
+	// a plain ADD COLUMN. This runs on the statement as the client sent it, so
+	// the value is still `now()` rather than its SQLite spelling.
+	d := indexWord(strings.ToLower(rest), "default")
+	if d < 0 {
+		return "", false
+	}
+	if !isComputedDefault(strings.TrimSpace(rest[d+len("default"):])) {
+		return "", false
+	}
+	if name, _, _ := parseColDef(rest); name == "" {
+		return "", false
+	}
+	return rest, true
+}
+
+// isComputedDefault reports whether a DEFAULT value is an expression SQLite
+// cannot store through ADD COLUMN: a parenthesised expression or a function
+// call. A literal or a bare keyword such as CURRENT_TIMESTAMP is constant
+// enough for SQLite to accept directly.
+func isComputedDefault(value string) bool {
+	if strings.HasPrefix(value, "(") {
+		return true
+	}
+	i := 0
+	for i < len(value) && isWordByte(value[i]) {
+		i++
+	}
+	if i == 0 {
+		return false
+	}
+	for i < len(value) && value[i] == ' ' {
+		i++
+	}
+	return i < len(value) && value[i] == '('
+}
+
+// alterAddColumnDefault adds a column carrying a computed default by rebuilding
+// the table with it in place.
+func (s *session) alterAddColumnDefault(table, def string) error {
+	ddl := s.tableDDL(table)
+	if ddl == "" {
+		return fmt.Errorf("relation %q does not exist", table)
+	}
+	open := strings.IndexByte(ddl, '(')
+	if open < 0 {
+		return fmt.Errorf("cannot read the definition of %q", table)
+	}
+	inner, after := balancedParen(ddl, open)
+
+	cols := existingColumnNames(inner)
+	if len(cols) == 0 {
+		return fmt.Errorf("cannot read the columns of %q", table)
+	}
+	// The definition still carries the client's spelling; the rebuild runs it
+	// against the engine directly, so it needs the dialect rewrite applied.
+	newDDL := ddl[:open+1] + inner + ", " + rewrite(def) + ddl[after-1:]
+	return s.rebuildTableCopying(table, newDDL, cols)
+}
+
+// existingColumnNames lists the column names in a CREATE TABLE body, skipping
+// table-level constraints.
+func existingColumnNames(inner string) []string {
+	var out []string
+	for _, d := range splitTopLevel(inner) {
+		name, _, _ := parseColDef(d)
+		if name == "" {
+			continue
+		}
+		switch strings.ToUpper(name) {
+		case "PRIMARY", "FOREIGN", "UNIQUE", "CHECK", "CONSTRAINT", "EXCLUDE":
+			continue
+		}
+		out = append(out, unquoteIdent(name))
+	}
+	return out
 }
