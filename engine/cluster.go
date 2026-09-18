@@ -80,12 +80,20 @@ type openDB struct {
 // latency of reopening a database that went cold.
 const DefaultMaxOpenDatabases = 64
 
+// MaintenanceDatabase always exists, as it does in PostgreSQL. A client has to
+// be connected to some database before it can create one, and every tool
+// defaults to this name: psql with no -d, pg_dumpall, and the "connect to
+// postgres, then CREATE DATABASE" step every migration framework performs on a
+// fresh server. Without it that first connection has nowhere to land.
+const MaintenanceDatabase = "postgres"
+
 // OpenCluster serves the database at path, and every <name>.db beside it. A
 // SQLite file is a database, so the directory holding one is the set of them:
 // CREATE DATABASE writes a new file there, and connecting by name opens it.
 //
 // The file at path is created if it does not exist, so pointing overlite at a
-// fresh path gives a client somewhere to connect and create the rest from.
+// fresh path gives a client somewhere to connect and create the rest from. So
+// is the maintenance database, whatever path names — see MaintenanceDatabase.
 func OpenCluster(path string, maxOpen int) (*Dir, error) {
 	if maxOpen <= 0 {
 		maxOpen = DefaultMaxOpenDatabases
@@ -103,8 +111,14 @@ func OpenCluster(path string, maxOpen int) (*Dir, error) {
 	}
 
 	d := &Dir{dir: dir, entry: entry, maxOpen: maxOpen, open: map[string]*openDB{}}
-	if !d.exists(entry) {
-		if err := d.CreateDatabase(context.Background(), entry); err != nil {
+	// The entry database and the maintenance one. They are usually different,
+	// and when path already names the maintenance database this creates it
+	// once.
+	for _, name := range []string{entry, MaintenanceDatabase} {
+		if d.exists(name) {
+			continue
+		}
+		if err := d.CreateDatabase(context.Background(), name); err != nil {
 			return nil, err
 		}
 	}
@@ -224,6 +238,9 @@ func (d *Dir) CreateDatabase(ctx context.Context, database string) error {
 
 // DropDatabase closes the database and deletes its files.
 func (d *Dir) DropDatabase(_ context.Context, database string) error {
+	if database == MaintenanceDatabase {
+		return fmt.Errorf("cannot drop the maintenance database %q", MaintenanceDatabase)
+	}
 	if database == d.entry {
 		return fmt.Errorf("cannot drop %q: it is the database this server was started with, "+
 			"and the one a client connects to before it can create another", database)
