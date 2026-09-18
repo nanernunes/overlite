@@ -48,7 +48,8 @@ func (s *single) DropDatabase(context.Context, string) error   { return errNotAD
 func (s *single) Close() error                                 { return s.eng.Close() }
 
 var errNotADirectory = fmt.Errorf(
-	"this server holds a single database; start it with --db-dir to create and drop databases")
+	"this server holds a single database; point overlite at a file in a writable " +
+		"directory to create and drop databases")
 
 // --- a directory of databases -------------------------------------------------
 
