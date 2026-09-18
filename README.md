@@ -82,6 +82,7 @@ container setups.
 | — | `POSTGRES_PASSWORD` | *(unset)* | when set, requires password auth (else trust) |
 | — | `POSTGRES_SSL` | *(unset)* | `on` enables TLS with a self-signed cert (clients use `sslmode=require`) |
 | — | `POSTGRES_SSL_CERT` / `POSTGRES_SSL_KEY` | *(unset)* | PEM cert/key to serve instead of self-signed |
+| `--max-open-databases` | — | `64` | how many database files stay open at once (see [Many databases](#many-databases)) |
 | — | `OVERLITE_HBA_DIR` | `.` | directory holding `pg_hba.conf` and/or `pg_hba.yaml` (see below); overrides the global auth method |
 
 The port belongs to the driver — postgres defaults to 5432 — and is only
@@ -120,6 +121,35 @@ against **its own password** — `CREATE ROLE alice LOGIN PASSWORD 'x'` stores a
 SCRAM verifier (never plaintext), and roles without one fall back to
 `POSTGRES_PASSWORD`.
 
+## Many databases
+
+A server started with one file serves one database. It also serves every other
+`*.db` file beside it, and `CREATE DATABASE` writes a new one there:
+
+```sh
+$ overlite postgres.db
+```
+```sql
+CREATE DATABASE shop;           -- writes ./shop.db
+\c shop
+CREATE TABLE orders (id int);   -- lands in shop.db, nowhere else
+DROP DATABASE shop;             -- removes the file
+```
+
+The directory is taken from the file, so there is nothing else to configure.
+Each database is a separate SQLite file with its own connection, which is what
+makes this the isolation a schema cannot give: a query on one database has no
+way to name a table in another, however it is written, and a tenant's data can
+be handed over or deleted by moving one file.
+
+Files are opened as they are asked for and the idle ones are closed once
+`--max-open-databases` (default 64) are open, so a server can hold far more
+databases than it keeps open at once. Reopening one costs a handshake.
+
+`postgres` is always served whether or not the file exists, because a client has
+to connect to something in order to create the first database — that is what
+`psql -d postgres` and every migration tool expect.
+
 ## Schemas
 
 By default all schemas live in the one file — the file you point at is the
@@ -137,10 +167,9 @@ This makes `CREATE`/`DROP SCHEMA` transactional and lets foreign keys cross
 schemas. The file stays plain-SQLite readable (`sales.orders` is a table named
 `"sales.orders"`).
 
-Set **`OVERLITE_MULTITENANT_SCHEMA=true`** for the alternative model, where each
-schema is a *separate attached file* (`shop.db` + `shop.sales.db` +
-`shop.audit.db`) for physical per-tenant isolation — auto-discovered on connect.
-There schema DDL can't run in a transaction (`ATTACH` can't).
+For physical isolation between tenants, give each one a *database* rather than a
+schema: `CREATE DATABASE shop` writes `shop.db` beside the file overlite was
+started with, and a connection to it can only ever see that file. See [Many databases](#many-databases).
 
 ## Status
 
