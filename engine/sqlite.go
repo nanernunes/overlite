@@ -121,7 +121,11 @@ func (ss *sqliteSession) Close() error { return ss.conn.Close() }
 func buildDSN(path string) string {
 	// modernc reads pragmas from the DSN query string.
 	pragmas := url.Values{}
-	pragmas.Add("_pragma", "busy_timeout(5000)")
+	// A writer waits for another's transaction, as Postgres waits on a lock —
+	// up to 30 seconds, long enough for a migration or a long import, then
+	// "database is locked" (SQLSTATE 55P03). Five seconds turned an ordinary
+	// busy moment into an error.
+	pragmas.Add("_pragma", "busy_timeout(30000)")
 	pragmas.Add("_pragma", "foreign_keys(on)")
 	if path == ":memory:" {
 		// A shared-cache in-memory db so every pool connection sees the same
