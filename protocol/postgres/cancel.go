@@ -27,7 +27,7 @@ func (s *session) sendExecError(err error) error {
 	if isCanceled(err) {
 		return s.c.sendError("57014", "canceling statement due to user request")
 	}
-	return s.c.sendError("42000", err.Error())
+	return s.c.sendError(sqlState(err), err.Error())
 }
 
 // protoExecError is sendExecError for the extended-query path (arms the
@@ -36,7 +36,7 @@ func (s *session) protoExecError(err error) error {
 	if isCanceled(err) {
 		return s.protoError("57014", "canceling statement due to user request")
 	}
-	return s.protoError("42000", err.Error())
+	return s.protoError(sqlState(err), err.Error())
 }
 
 // Query cancellation follows the Postgres model: each connection is assigned a
