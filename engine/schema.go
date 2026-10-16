@@ -175,8 +175,41 @@ func schemaRefs(schemas []string) []schemaRef {
 // CREATE/DROP SCHEMA.
 func setupConnection(ctx context.Context, exec func(string) error, query func(string) ([]string, error), mainPath string) error {
 	st := stateFor(mainPath)
+	/*
+		Only what is missing is written. Writing takes the database's write lock,
+		and a new connection that wrote its bootstrap every time — the default
+		role, the internal tables, their migrations — waited on any client's open
+		write transaction, past the session timeout: refused as "too many
+		clients" with the server empty. Postgres lets a client in while another
+		writes; so does this, reading first.
+	*/
+	tables := map[string]bool{}
+	if names, err := query("SELECT name FROM sqlite_master WHERE type = 'table'"); err == nil {
+		for _, n := range names {
+			tables[strings.ToLower(n)] = true
+		}
+	}
+	create := func(ddl string) error {
+		if m := createdTableRe.FindStringSubmatch(ddl); m != nil && tables[strings.ToLower(m[1])] {
+			return nil
+		}
+		return exec(ddl)
+	}
+	addColumn := func(ddl string) {
+		if m := addedColumnRe.FindStringSubmatch(ddl); m != nil {
+			cols, err := query("SELECT name FROM pragma_table_info(" + sqlQuote(m[1]) + ")")
+			if err == nil {
+				for _, c := range cols {
+					if strings.EqualFold(c, m[2]) {
+						return
+					}
+				}
+			}
+		}
+		_ = exec(ddl) // an older table without the column; errors harmlessly if present
+	}
 	// The schema registry is the list of schemas this database holds.
-	if err := exec(schemasTableDDL); err != nil {
+	if err := create(schemasTableDDL); err != nil {
 		return err
 	}
 	var schemas []string
@@ -187,59 +220,61 @@ func setupConnection(ctx context.Context, exec func(string) error, query func(st
 
 	// The internal roles table (pg_roles reads from it) must exist before the
 	// meta views are built.
-	if err := exec(rolesTableDDL); err != nil {
+	if err := create(rolesTableDDL); err != nil {
 		return err
 	}
-	_ = exec(rolesAddPasswordDDL) // migrate older tables; errors if already present
-	if err := exec(seedDefaultRoleSQL()); err != nil {
-		return err
+	addColumn(rolesAddPasswordDDL)
+	if has, err := query("SELECT 1 FROM _overlite_roles WHERE rolname = " + sqlQuote(catalogRole)); err != nil || len(has) == 0 {
+		if err := exec(seedDefaultRoleSQL()); err != nil {
+			return err
+		}
 	}
 	// The internal sequences table (nextval/currval/... read and write it).
-	if err := exec(sequencesTableDDL); err != nil {
+	if err := create(sequencesTableDDL); err != nil {
 		return err
 	}
-	if err := exec(columnDefaultsTableDDL); err != nil {
+	if err := create(columnDefaultsTableDDL); err != nil {
 		return err
 	}
 	// The internal enum tables (pg_type/pg_enum read them; enum columns become
 	// TEXT + CHECK).
-	if err := exec(enumTypesTableDDL); err != nil {
+	if err := create(enumTypesTableDDL); err != nil {
 		return err
 	}
-	if err := exec(enumLabelsTableDDL); err != nil {
+	if err := create(enumLabelsTableDDL); err != nil {
 		return err
 	}
-	if err := exec(compositeTypesTableDDL); err != nil {
+	if err := create(compositeTypesTableDDL); err != nil {
 		return err
 	}
 	// COMMENT ON storage (pg_description reads it).
-	if err := exec(commentsTableDDL); err != nil {
+	if err := create(commentsTableDDL); err != nil {
 		return err
 	}
 	// LANGUAGE sql function definitions (inlined at call sites).
-	if err := exec(functionsTableDDL); err != nil {
+	if err := create(functionsTableDDL); err != nil {
 		return err
 	}
 	for _, ddl := range functionsAddColsDDL {
-		_ = exec(ddl) // migrate older tables; errors harmlessly if present
+		addColumn(ddl)
 	}
 	// The internal privilege tables (GRANT/REVOKE storage + table ownership),
 	// consulted by the protocol before running a statement.
-	if err := exec(grantsTableDDL); err != nil {
+	if err := create(grantsTableDDL); err != nil {
 		return err
 	}
-	if err := exec(ownersTableDDL); err != nil {
+	if err := create(ownersTableDDL); err != nil {
 		return err
 	}
-	if err := exec(membershipsTableDDL); err != nil {
+	if err := create(membershipsTableDDL); err != nil {
 		return err
 	}
-	_ = exec(membershipsAddAdminDDL) // migrate older tables; errors if present
+	addColumn(membershipsAddAdminDDL)
 	// Row-level security flags and policies.
-	if err := exec(rlsTableDDL); err != nil {
+	if err := create(rlsTableDDL); err != nil {
 		return err
 	}
-	if err := exec(policiesTableDDL); err != nil {
+	if err := create(policiesTableDDL); err != nil {
 		return err
 	}
 	// Expose each sequence as a one-row relation (last_value/is_called), as
@@ -290,6 +325,11 @@ func setupConnection(ctx context.Context, exec func(string) error, query func(st
 	}
 	return nil
 }
+
+var (
+	createdTableRe = regexp.MustCompile(`(?i)^\s*CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+"?([A-Za-z0-9_]+)"?`)
+	addedColumnRe  = regexp.MustCompile(`(?i)^\s*ALTER\s+TABLE\s+"?([A-Za-z0-9_]+)"?\s+ADD\s+COLUMN\s+"?([A-Za-z0-9_]+)"?`)
+)
 
 // dropViewOf returns a DROP VIEW statement for the view a CREATE statement
 // defines, so we can rebuild dynamic views when the schema set changes.
