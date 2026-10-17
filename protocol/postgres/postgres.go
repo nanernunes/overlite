@@ -676,6 +676,16 @@ func (c *wireConn) sendParameterDescription(n int) error {
 	return c.send(msgParameterDescription, b)
 }
 
+// sendParameterTypes advertises a parameter per OID, 0 for one left to the client.
+func (c *wireConn) sendParameterTypes(oids []uint32) error {
+	var b []byte
+	b = appendInt16(b, len(oids))
+	for _, oid := range oids {
+		b = appendUint32(b, oid)
+	}
+	return c.send(msgParameterDescription, b)
+}
+
 func (c *wireConn) sendCommandComplete(tag string) error {
 	return c.send(msgCommandComplete, appendCString(nil, tag))
 }

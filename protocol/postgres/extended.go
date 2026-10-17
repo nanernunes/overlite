@@ -490,7 +490,7 @@ func (s *session) handleDescribe(body []byte) error {
 			}
 			return s.sendUtilDescribe(prep.util)
 		}
-		if err := s.c.sendParameterDescription(prep.numParams); err != nil {
+		if err := s.c.sendParameterTypes(s.paramTypes(prep.raw, prep.numParams)); err != nil {
 			return err
 		}
 		// Probe with 0 (not NULL) so expression columns like "$1 * 2" keep a

@@ -301,7 +301,8 @@ func encodeValue(format int, oid uint32, v core.Value) []byte {
 func encodeBinary(oid uint32, v core.Value) []byte {
 	switch oid {
 	case oidBool:
-		if toInt64(v) != 0 {
+		// A stored "t" too, as encodeText reads it.
+		if boolish(v) {
 			return []byte{1}
 		}
 		return []byte{0}
