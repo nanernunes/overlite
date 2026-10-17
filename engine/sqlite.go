@@ -127,6 +127,11 @@ func buildDSN(path string) string {
 	// busy moment into an error.
 	pragmas.Add("_pragma", "busy_timeout(30000)")
 	pragmas.Add("_pragma", "foreign_keys(on)")
+	// A transaction takes the write lock when it begins, so it waits its turn
+	// there. Begun deferred, two that read and then write — as an ORM's do —
+	// both read, then race to write, and the loser fails at once: "database
+	// is locked" (SQLITE_BUSY_SNAPSHOT), which no busy timeout waits out.
+	pragmas.Add("_txlock", "immediate")
 	if path == ":memory:" {
 		// A shared-cache in-memory db so every pool connection sees the same
 		// data; a plain :memory: would give each connection its own database.
