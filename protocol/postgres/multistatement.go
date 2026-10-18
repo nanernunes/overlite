@@ -15,7 +15,10 @@ import (
 
 // handleQuery runs a Query message, statement by statement.
 func (s *session) handleQuery(body []byte) error {
-	stmts := splitStatements(strings.TrimRight(string(body), "\x00"))
+	var stmts []string
+	for _, st := range splitStatements(strings.TrimRight(string(body), "\x00")) {
+		stmts = append(stmts, splitAlterActions(st)...)
+	}
 	if len(stmts) <= 1 {
 		return s.handleSimpleQuery(body)
 	}
