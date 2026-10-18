@@ -258,6 +258,14 @@ var registerCatalog = sync.OnceFunc(func() {
 		}
 		return int64(0), nil
 	})
+	// The array that unnest and generate_subscripts in a select list step
+	// through (whatever form it is stored in), and its first subscript.
+	scalar("overlite_array_json", 1, func(a []driver.Value) (driver.Value, error) {
+		return arrayAsJSON(a[0]), nil
+	})
+	scalar("overlite_array_lower", 1, func(a []driver.Value) (driver.Value, error) {
+		return arrayLower(a[0]), nil
+	})
 	// array_agg is a real aggregate (pg_dump collects index/constraint columns
 	// with it); it builds a Postgres array literal {a,b,c}.
 	sqlite.MustRegisterFunction("array_agg", &sqlite.FunctionImpl{

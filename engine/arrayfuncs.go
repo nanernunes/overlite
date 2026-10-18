@@ -3,6 +3,8 @@ package engine
 import (
 	"database/sql/driver"
 	"encoding/json"
+	"regexp"
+	"strings"
 )
 
 // Arrays are stored as JSON arrays in TEXT cells (see the protocol's array.go).
@@ -52,4 +54,54 @@ func jsonArrayLen(v driver.Value) (int64, bool) {
 		return 0, false
 	}
 	return int64(len(arr)), true
+}
+
+// reIntVector matches the text form of int2vector/oidvector ("1 2 3"), the type
+// of the catalog's pg_index.indkey/indclass/indoption.
+var reIntVector = regexp.MustCompile(`^-?\d+(?: -?\d+)*$`)
+
+// arrayAsJSON returns v as a JSON array whatever form the array arrived in: a
+// stored JSON array as is, Postgres' '{a,b}' text, or a vector's "1 2". It is
+// what unnest and generate_subscripts expand, so they work on the catalog's
+// vectors as well as on stored arrays. Anything else is NULL: no elements.
+func arrayAsJSON(v driver.Value) driver.Value {
+	s := strings.TrimSpace(argStr(v))
+	switch {
+	case s == "":
+		return nil
+	case isJSONArrayText(s):
+		return s
+	case reIntVector.MatchString(s):
+		return "[" + strings.Join(strings.Fields(s), ",") + "]"
+	case strings.HasPrefix(s, "{") && strings.HasSuffix(s, "}"):
+		inner := strings.TrimSpace(s[1 : len(s)-1])
+		if inner == "" {
+			return "[]"
+		}
+		parts := strings.Split(inner, ",")
+		for i, p := range parts {
+			p = strings.Trim(strings.TrimSpace(p), `"`)
+			switch {
+			case strings.EqualFold(p, "null"):
+				parts[i] = "null"
+			case reIntVector.MatchString(p):
+				parts[i] = p
+			default:
+				b, _ := json.Marshal(p)
+				parts[i] = string(b)
+			}
+		}
+		return "[" + strings.Join(parts, ",") + "]"
+	}
+	return nil
+}
+
+// arrayLower is the subscript of an array's first element: 1, except for the
+// catalog's int2vector/oidvector columns, which Postgres numbers from 0
+// (generate_subscripts(indkey, 1) starts at 0).
+func arrayLower(v driver.Value) driver.Value {
+	if reIntVector.MatchString(strings.TrimSpace(argStr(v))) && !isJSONArrayText(argStr(v)) {
+		return int64(0)
+	}
+	return int64(1)
 }

@@ -43,8 +43,8 @@ func rewrite(sql string) string {
 	sql = rewriteStringAgg(sql)
 	sql = rewriteGenerateSeries(sql)
 	sql = rewritePgOptionsToTable(sql)
-	sql = rewriteUnnestSelect(sql) // SELECT unnest(arr) FROM t -> json_each cross join
-	sql = rewriteUnnest(sql)       // must see raw '{…}'::t[] for pg_dump's bulk fetch
+	sql = rewriteSelectListSRFs(sql) // SELECT unnest(arr) FROM t -> json_each cross join
+	sql = rewriteUnnest(sql)         // must see raw '{…}'::t[] for pg_dump's bulk fetch
 	sql = rewritePartitionSRF(sql)
 	sql = rewriteArrayLiteral(sql)  // ARRAY[…] -> json_array(…)
 	sql = rewriteArrayCast(sql)     // '{…}'::type[] -> JSON literal (after unnest)
