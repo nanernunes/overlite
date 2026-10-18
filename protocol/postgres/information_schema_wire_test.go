@@ -15,27 +15,28 @@ func TestInformationSchemaConstraints(t *testing.T) {
 	mustExec(t, conn, `CREATE TABLE emp (
 		id int PRIMARY KEY, dept_id int REFERENCES dept(id), email text NOT NULL)`)
 
-	// table_constraints lists PK, FK and UNIQUE with Postgres-style names.
+	// table_constraints lists PK, FK and UNIQUE with Postgres' names: an
+	// unnamed foreign key is <table>_<column>_fkey, as Postgres names it.
 	assert.Equal(t, []string{
 		"dept:PRIMARY KEY:dept_pkey",
 		"dept:UNIQUE:dept_name_key",
-		"emp:FOREIGN KEY:fk_emp_0",
+		"emp:FOREIGN KEY:emp_dept_id_fkey",
 		"emp:PRIMARY KEY:emp_pkey",
 	}, queryColumn(t, conn, `SELECT table_name || ':' || constraint_type || ':' || constraint_name
 		FROM information_schema.table_constraints WHERE table_schema = 'public'
 		ORDER BY table_name, constraint_type`, 0))
 
 	// key_column_usage maps constraints to their columns.
-	assert.Equal(t, []string{"dept_pkey:id", "emp_pkey:id", "fk_emp_0:dept_id"},
+	assert.Equal(t, []string{"dept_pkey:id", "emp_dept_id_fkey:dept_id", "emp_pkey:id"},
 		queryColumn(t, conn, `SELECT constraint_name || ':' || column_name
 			FROM information_schema.key_column_usage
-			WHERE constraint_name IN ('dept_pkey','emp_pkey','fk_emp_0')
+			WHERE constraint_name IN ('dept_pkey','emp_pkey','emp_dept_id_fkey')
 			ORDER BY constraint_name`, 0))
 
 	// referential_constraints links the FK to the referenced key.
 	var uniq, del string
 	require.NoError(t, conn.QueryRow(ctx, `SELECT unique_constraint_name, delete_rule
-		FROM information_schema.referential_constraints WHERE constraint_name = 'fk_emp_0'`).
+		FROM information_schema.referential_constraints WHERE constraint_name = 'emp_dept_id_fkey'`).
 		Scan(&uniq, &del))
 	assert.Equal(t, "dept_pkey", uniq)
 	assert.Equal(t, "NO ACTION", del)

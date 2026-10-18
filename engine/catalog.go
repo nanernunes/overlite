@@ -326,7 +326,11 @@ var registerCatalog = sync.OnceFunc(func() {
 		if name, ok := lookupEnumName(oid); ok {
 			return name, nil
 		}
-		return formatTypeName(oid), nil
+		typmod := int64(-1)
+		if len(args) > 1 && args[1] != nil {
+			typmod = asInt64(args[1])
+		}
+		return formatTypeMod(oid, typmod), nil
 	})
 	scalar("overlite_type_oid", 1, func(args []driver.Value) (driver.Value, error) {
 		if len(args) == 0 {
@@ -354,6 +358,26 @@ var registerCatalog = sync.OnceFunc(func() {
 	})
 	scalar("overlite_numeric_scale", 1, func(a []driver.Value) (driver.Value, error) {
 		return typeNumericScale(argStr(a[0])), nil
+	})
+	scalar("overlite_numeric_precision_radix", 1, func(a []driver.Value) (driver.Value, error) {
+		return typeNumericPrecisionRadix(argStr(a[0])), nil
+	})
+	scalar("overlite_datetime_precision", 1, func(a []driver.Value) (driver.Value, error) {
+		return typeDatetimePrecision(argStr(a[0])), nil
+	})
+	scalar("overlite_typmod", 1, func(a []driver.Value) (driver.Value, error) {
+		return typeAttTypmod(argStr(a[0])), nil
+	})
+	// Constraint names and index opclasses as Postgres reports them; see
+	// constraints.go. The column list is comma-separated, in key order.
+	scalar("overlite_fk_name", 4, func(a []driver.Value) (driver.Value, error) {
+		return fkConstraintName(argStr(a[0]), argStr(a[1]), strings.Split(argStr(a[2]), ","), argStr(a[3])), nil
+	})
+	scalar("overlite_pk_name", 2, func(a []driver.Value) (driver.Value, error) {
+		return pkConstraintName(argStr(a[0]), argStr(a[1])), nil
+	})
+	scalar("overlite_opclass", 1, func(a []driver.Value) (driver.Value, error) {
+		return defaultOpclassOID(argStr(a[0])), nil
 	})
 
 	// jsonb containment (@> / <@, rewritten to json_contains in the dialect); the
@@ -583,9 +607,11 @@ const (
 	typeOIDBool        = 16
 	typeOIDBytea       = 17
 	typeOIDInt8        = 20
+	typeOIDInt2        = 21
 	typeOIDInt4        = 23
 	typeOIDText        = 25
 	typeOIDFloat8      = 701
+	typeOIDVarchar     = 1043
 	typeOIDNumeric     = 1700
 	typeOIDDate        = 1082
 	typeOIDTimestamp   = 1114
@@ -608,8 +634,16 @@ func sqliteTypeOID(decl string) int64 {
 		return typeOIDJSONB
 	case strings.Contains(d, "JSON"):
 		return typeOIDJSON
+	// The integer widths are separate types to a client: Prisma reads an int8
+	// column as BigInt and an int4 as Int, so a BIGINT must not come back int4.
+	case strings.Contains(d, "BIGINT"), strings.Contains(d, "INT8"), strings.Contains(d, "BIGSERIAL"):
+		return typeOIDInt8
+	case strings.Contains(d, "SMALLINT"), strings.Contains(d, "INT2"), strings.Contains(d, "SMALLSERIAL"):
+		return typeOIDInt2
 	case strings.Contains(d, "INT"):
 		return typeOIDInt4
+	case strings.Contains(d, "VARCHAR"), strings.Contains(d, "CHARACTER VARYING"):
+		return typeOIDVarchar
 	case strings.Contains(d, "CHAR"), strings.Contains(d, "CLOB"), strings.Contains(d, "TEXT"):
 		return typeOIDText
 	case strings.Contains(d, "BLOB"):
@@ -645,10 +679,14 @@ func formatTypeName(oid int64) string {
 		return "bytea"
 	case typeOIDInt8:
 		return "bigint"
+	case typeOIDInt2:
+		return "smallint"
 	case typeOIDInt4:
 		return "integer"
 	case typeOIDText:
 		return "text"
+	case typeOIDVarchar:
+		return "character varying"
 	case typeOIDFloat8:
 		return "double precision"
 	case typeOIDNumeric:
@@ -729,10 +767,15 @@ func asInt64(v driver.Value) int64 {
 // pg_constraint/information_schema.*) are generated in catalog_views.go.
 var staticCatalogViews = []string{
 	// The outer SELECT adds the columns \dT+ and pg_dump read (typacl,
-	// typispreferred, typisdefined, ...) without touching every UNION row.
+	// typispreferred, typisdefined, ...) without touching every UNION row. The
+	// I/O functions (typinput, ...) are not modeled: 0, Postgres' "none", which
+	// is enough for the introspection that filters on them (Prisma's
+	// `typinput::regproc::text <> 'array_in'`).
 	`CREATE TEMP VIEW IF NOT EXISTS pg_type AS
 	 SELECT ov_t.*, 1247 AS tableoid, NULL AS typacl, 0 AS typispreferred, 1 AS typisdefined,
-	        '-' AS typalign, 'p' AS typstorage, 0 AS typrelid2 FROM (
+	        '-' AS typalign, 'p' AS typstorage, 0 AS typrelid2,
+	        0 AS typinput, 0 AS typoutput, 0 AS typreceive, 0 AS typsend,
+	        0 AS typmodin, 0 AS typmodout, 0 AS typanalyze FROM (
 	 SELECT 16 AS oid, 'bool' AS typname, 11 AS typnamespace, 10 AS typowner,
 	        'b' AS typtype, 'B' AS typcategory, 1 AS typlen, 0 AS typbyval,
 	        0 AS typrelid, 0 AS typelem, 1000 AS typarray, 0 AS typnotnull,
@@ -906,9 +949,25 @@ var staticCatalogViews = []string{
 	 SELECT 0 AS oid, '' AS oprname, 11 AS oprnamespace, 10 AS oprowner, 'b' AS oprkind,
 	        0 AS oprleft, 0 AS oprright, 0 AS oprresult, 0 AS oprcom, 0 AS oprnegate,
 	        0 AS oprcode WHERE 0`,
+	// The default btree operator classes of the types overlite reports, with
+	// Postgres' own oids: pg_index.indclass names them (defaultOpclassOID), and
+	// introspection reads opcname/opcdefault to tell a default class from one
+	// an index asked for.
 	`CREATE TEMP VIEW IF NOT EXISTS pg_opclass AS
-	 SELECT 0 AS oid, 0 AS opcmethod, '' AS opcname, 11 AS opcnamespace, 10 AS opcowner,
-	        0 AS opcfamily, 0 AS opcintype, 1 AS opcdefault, 0 AS opckeytype WHERE 0`,
+	 SELECT 10003 AS oid, 403 AS opcmethod, 'bool_ops' AS opcname, 11 AS opcnamespace, 10 AS opcowner,
+	        0 AS opcfamily, 16 AS opcintype, 1 AS opcdefault, 0 AS opckeytype
+	 UNION ALL SELECT 10006, 403, 'bytea_ops',       11, 10, 0, 17,   1, 0
+	 UNION ALL SELECT 3122,  403, 'date_ops',        11, 10, 0, 1082, 1, 0
+	 UNION ALL SELECT 3123,  403, 'float8_ops',      11, 10, 0, 701,  1, 0
+	 UNION ALL SELECT 1979,  403, 'int2_ops',        11, 10, 0, 21,   1, 0
+	 UNION ALL SELECT 1978,  403, 'int4_ops',        11, 10, 0, 23,   1, 0
+	 UNION ALL SELECT 3124,  403, 'int8_ops',        11, 10, 0, 20,   1, 0
+	 UNION ALL SELECT 3125,  403, 'numeric_ops',     11, 10, 0, 1700, 1, 0
+	 UNION ALL SELECT 3126,  403, 'text_ops',        11, 10, 0, 25,   1, 0
+	 UNION ALL SELECT 3127,  403, 'timestamptz_ops', 11, 10, 0, 1184, 1, 0
+	 UNION ALL SELECT 3128,  403, 'timestamp_ops',   11, 10, 0, 1114, 1, 0
+	 UNION ALL SELECT 10065, 403, 'uuid_ops',        11, 10, 0, 2950, 1, 0
+	 UNION ALL SELECT 10088, 403, 'jsonb_ops',       11, 10, 0, 3802, 1, 0`,
 	`CREATE TEMP VIEW IF NOT EXISTS pg_opfamily AS
 	 SELECT 0 AS oid, 0 AS opfmethod, '' AS opfname, 11 AS opfnamespace, 10 AS opfowner WHERE 0`,
 	`CREATE TEMP VIEW IF NOT EXISTS pg_conversion AS
