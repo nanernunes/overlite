@@ -370,6 +370,7 @@ func (s *session) handleParse(body []byte) error {
 		s.prepared[name] = &prepared{blank: true}
 		return s.c.send(msgParseComplete, nil)
 	}
+	raw = stripLeadingComments(raw)
 	if kind := txControlKind(raw); kind != "" {
 		s.prepared[name] = &prepared{txControl: kind}
 		return s.c.send(msgParseComplete, nil)
