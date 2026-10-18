@@ -318,51 +318,6 @@ func rewriteAnyArrayExpr(sql string) string {
 	}
 }
 
-// rewriteUnnestSelect turns `SELECT … unnest(arr) … FROM tref …` into a
-// json_each cross join: the set-returning unnest in the target list moves to the
-// FROM clause (SQLite can't return a set from the SELECT list). Handles a single
-// unnest over a query with a FROM clause; other shapes fall through to
-// rewriteUnnest.
-func rewriteUnnestSelect(sql string) string {
-	if !strings.EqualFold(firstWordUpper(sql), "SELECT") {
-		return sql
-	}
-	low := strings.ToLower(sql)
-	fromIdx := topLevelKeyword(sql, "from")
-	if fromIdx < 0 {
-		return sql
-	}
-	ui := indexWordCall(low[:fromIdx], "unnest", 0)
-	if ui < 0 {
-		return sql
-	}
-	// Only a top-level unnest in the target list is moved to FROM; one nested in
-	// a subquery/parens (e.g. array(select … from unnest(x))) is left to
-	// rewriteUnnest.
-	if parenDepthAt(sql, ui) != 0 {
-		return sql
-	}
-	open := ui + len("unnest")
-	for open < fromIdx && sql[open] == ' ' {
-		open++
-	}
-	arg, end, ok := readParenArgs(sql, open)
-	if !ok || end > fromIdx {
-		return sql
-	}
-	// End of the FROM clause: the next top-level clause keyword, or end.
-	rest := sql[fromIdx:]
-	cut := len(rest)
-	for _, kw := range []string{"where", "group", "having", "order", "limit", "union", "except", "intersect"} {
-		if p := topLevelKeyword(rest, kw); p > len("from") && p < cut {
-			cut = p
-		}
-	}
-	a := strings.TrimSpace(arg)
-	return sql[:ui] + "_u.value" + sql[end:fromIdx] +
-		rest[:cut] + ", json_each(CASE WHEN json_valid(" + a + ") THEN " + a + " END) _u " + rest[cut:]
-}
-
 // parenDepthAt returns the parenthesis nesting depth at position pos, ignoring
 // parens inside string literals.
 func parenDepthAt(sql string, pos int) int {
