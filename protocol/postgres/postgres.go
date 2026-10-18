@@ -708,6 +708,7 @@ func (c *wireConn) sendErrorSeverity(severity, code, message string) error {
 	b = append(b, 'M')
 	b = appendCString(b, message)
 	b = append(b, 0) // terminator
+	c.errored = true
 	return c.send(msgErrorResponse, b)
 }
 

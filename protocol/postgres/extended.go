@@ -283,7 +283,7 @@ func (s *session) loop() error {
 		switch typ {
 		case msgQuery:
 			s.failed = false
-			if err := s.handleSimpleQuery(body); err != nil {
+			if err := s.handleQuery(body); err != nil {
 				return err
 			}
 			if err := s.readyForQuery(); err != nil {

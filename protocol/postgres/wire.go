@@ -65,6 +65,7 @@ type wireConn struct {
 	r       *bufio.Reader
 	w       *bufio.Writer
 	secured bool // the connection was upgraded to TLS
+	errored bool // an ErrorResponse went out since this was last cleared
 }
 
 func newWireConn(c net.Conn) *wireConn {
