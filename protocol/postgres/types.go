@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -117,6 +118,34 @@ var boolCatalogColumns = map[string]bool{
 	"pg_advisory_unlock": true, "pg_advisory_unlock_shared": true,
 	// pg_tables / pg_indexes summaries.
 	"hasindexes": true, "hasrules": true, "hastriggers": true, "rowsecurity": true,
+}
+
+// intCatalogColumns are integer columns of catalog queries that Describe can't
+// type when its probe run returns no rows (an expression column has no declared
+// type to fall back on): the catalogs' oid and number columns, and the aliases
+// Prisma's introspection reads as integers. Only queries over the catalogs get
+// these (isCatalogQuery), so a user query's own "parent" column is never taken
+// for one.
+var intCatalogColumns = map[string]bool{
+	"oid": true, "attnum": true, "attrelid": true, "atttypid": true, "atttypmod": true,
+	"relnamespace": true, "reltype": true, "relam": true, "relnatts": true,
+	"conrelid": true, "confrelid": true, "conindid": true, "contypid": true,
+	"indrelid": true, "indexrelid": true, "indnatts": true, "indnkeyatts": true,
+	"typnamespace": true, "typlen": true, "typelem": true, "typrelid": true,
+	"typbasetype": true, "typtypmod": true, "enumtypid": true, "adrelid": true, "adnum": true,
+	"ordinal_position": true, "numeric_precision": true, "numeric_scale": true,
+	"numeric_precision_radix": true, "datetime_precision": true, "character_maximum_length": true,
+	// Prisma's aliases.
+	"con_id": true, "child": true, "parent": true, "colidx": true, "column_index": true,
+	"indkeyid": true, "indkeyidx": true,
+}
+
+// reCatalogRef matches a reference to a catalog relation.
+var reCatalogRef = regexp.MustCompile(`(?i)\b(pg_[a-z_]+|information_schema)\b`)
+
+// isCatalogQuery reports whether a statement reads the catalogs.
+func isCatalogQuery(sql string) bool {
+	return reCatalogRef.MatchString(sql)
 }
 
 // oidForColumn picks an OID for a column. SQLite is dynamically typed, so we

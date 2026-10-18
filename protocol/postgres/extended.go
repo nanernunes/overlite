@@ -89,6 +89,9 @@ type prepared struct {
 	// paramOIDs is each parameter's type: the client's from Parse, then the
 	// ones Describe advertised. Bind reads binary parameters by it.
 	paramOIDs []uint32
+	// resultOIDs are the row types Describe advertised for the statement;
+	// Execute encodes its rows by them (see describedOIDs).
+	resultOIDs []uint32
 	// blank marks a statement with nothing executable in it (a lone comment),
 	// answered with EmptyQueryResponse at Execute.
 	blank bool
@@ -124,6 +127,8 @@ type portal struct {
 	prep    *prepared
 	params  []core.Value
 	formats []int // result-column format codes from Bind
+	// resultOIDs are the row types a Describe of the portal advertised.
+	resultOIDs []uint32
 
 	// result and pos support partial fetch (Execute's max-rows): the query runs
 	// once, then successive Executes page through the buffered rows, emitting
@@ -500,6 +505,7 @@ func (s *session) handleDescribe(body []byte) error {
 	}
 
 	var prep *prepared
+	var pt *portal
 	var args []core.Value
 
 	switch kind {
@@ -522,7 +528,7 @@ func (s *session) handleDescribe(body []byte) error {
 		// concrete type we can advertise; NULL would erase it.
 		args = probeArgs(prep.numParams)
 	case 'P':
-		pt := s.portals[name]
+		pt = s.portals[name]
 		if pt == nil {
 			return s.protoError("34000", "unknown portal "+quoteName(name))
 		}
@@ -551,10 +557,36 @@ func (s *session) handleDescribe(body []byte) error {
 		return s.c.send(msgNoData, nil)
 	}
 	oids := make([]uint32, len(cols))
+	catalog := isCatalogQuery(prep.raw)
 	for i, col := range cols {
 		oids[i] = oidForColumn(col, nil, i)
+		if catalog && oids[i] == oidText && col.DeclType == "" && intCatalogColumns[col.Name] {
+			oids[i] = oidInt8
+		}
+	}
+	if pt != nil {
+		pt.resultOIDs = oids
+	} else {
+		prep.resultOIDs = oids
 	}
 	return s.c.sendRowDescription(cols, oids)
+}
+
+// describedOIDs returns the row types a Describe advertised for this portal or
+// its statement, if it was described and the result has that many columns. A
+// client decodes the rows by those types, so they must be the types the rows
+// are encoded in: Describe types an expression column by a probe run, and when
+// that run returns no rows it can only say text, while the rows of the real run
+// would sample as integers. Sent in binary under a text description, an
+// integer arrived as eight raw bytes (Prisma: "invalid utf-8 sequence").
+func (pt *portal) describedOIDs(n int) []uint32 {
+	if len(pt.resultOIDs) == n {
+		return pt.resultOIDs
+	}
+	if len(pt.prep.resultOIDs) == n {
+		return pt.prep.resultOIDs
+	}
+	return nil
 }
 
 func (s *session) handleExecute(body []byte) error {
@@ -764,9 +796,12 @@ func (s *session) handleExecute(body []byte) error {
 	}
 
 	// Extended protocol: DataRows only (the RowDescription went out at Describe).
-	oids := make([]uint32, len(rs.Columns))
-	for i, col := range rs.Columns {
-		oids[i] = oidForColumn(col, rs.Rows, i)
+	oids := pt.describedOIDs(len(rs.Columns))
+	if oids == nil {
+		oids = make([]uint32, len(rs.Columns))
+		for i, col := range rs.Columns {
+			oids[i] = oidForColumn(col, rs.Rows, i)
+		}
 	}
 	end := len(rs.Rows)
 	if maxRows > 0 && pt.pos+maxRows < end {
