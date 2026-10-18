@@ -82,6 +82,9 @@ type prepared struct {
 	sql       string // rewritten, ready for the engine
 	raw       string // original statement, kept for sequence expansion (pre-rewrite)
 	numParams int
+	// paramOIDs is each parameter's type: the client's from Parse, then the
+	// ones Describe advertised. Bind reads binary parameters by it.
+	paramOIDs []uint32
 	// blank marks a statement with nothing executable in it (a lone comment),
 	// answered with EmptyQueryResponse at Execute.
 	blank bool
@@ -358,8 +361,9 @@ func (s *session) handleParse(body []byte) error {
 	name := r.cstring()
 	query := r.cstring()
 	nOIDs := r.int16()
-	for i := 0; i < nOIDs; i++ {
-		r.int32() // client-supplied type hints; ignored (we advertise text)
+	declared := make([]uint32, nOIDs)
+	for i := range declared {
+		declared[i] = uint32(r.int32())
 	}
 	if r.err != nil {
 		return s.protoError("08P01", "malformed Parse message")
@@ -424,7 +428,7 @@ func (s *session) handleParse(body []byte) error {
 		return s.c.send(msgParseComplete, nil)
 	}
 	sql := rewrite(raw)
-	s.prepared[name] = &prepared{sql: sql, raw: raw, numParams: countParams(sql)}
+	s.prepared[name] = &prepared{sql: sql, raw: raw, numParams: countParams(sql), paramOIDs: declared}
 	return s.c.send(msgParseComplete, nil)
 }
 
@@ -439,6 +443,10 @@ func (s *session) handleBind(body []byte) error {
 		fmts[i] = r.int16()
 	}
 
+	var oids []uint32
+	if prep := s.prepared[stmtName]; prep != nil {
+		oids = prep.paramOIDs
+	}
 	nParams := r.int16()
 	params := make([]core.Value, nParams)
 	for i := 0; i < nParams; i++ {
@@ -447,7 +455,11 @@ func (s *session) handleBind(body []byte) error {
 			params[i] = nil
 			continue
 		}
-		params[i] = decodeParam(formatFor(fmts, i), r.bytes(length))
+		var oid uint32
+		if i < len(oids) {
+			oid = oids[i]
+		}
+		params[i] = decodeParam(formatFor(fmts, i), oid, r.bytes(length))
 	}
 
 	nResFmt := r.int16()
@@ -490,7 +502,8 @@ func (s *session) handleDescribe(body []byte) error {
 			}
 			return s.sendUtilDescribe(prep.util)
 		}
-		if err := s.c.sendParameterTypes(s.paramTypes(prep.raw, prep.numParams)); err != nil {
+		prep.paramOIDs = s.paramTypes(prep.raw, prep.numParams, prep.paramOIDs)
+		if err := s.c.sendParameterTypes(prep.paramOIDs); err != nil {
 			return err
 		}
 		// Probe with 0 (not NULL) so expression columns like "$1 * 2" keep a
@@ -832,9 +845,10 @@ func formatFor(fmts []int, i int) int {
 }
 
 // decodeParam turns a bound parameter into a core.Value. Text is passed through
-// as a string (SQLite coerces as needed). Binary is a best-effort fallback,
-// since we advertise unknown parameter types to steer clients toward text.
-func decodeParam(format int, raw []byte) core.Value {
+// as a string (SQLite coerces as needed). Binary is read by the parameter's
+// type when it has one; otherwise it is a best-effort guess by its length,
+// since unknown parameter types steer clients toward text.
+func decodeParam(format int, oid uint32, raw []byte) core.Value {
 	if format == 0 {
 		// A timestamp carrying a zone is stored the way the same value written
 		// as a literal would be: bare UTC, at Postgres' precision. Without
@@ -842,6 +856,9 @@ func decodeParam(format int, raw []byte) core.Value {
 		// binding a Go time.Time stored nanoseconds and a "Z", which is not a
 		// timestamp any Postgres client can read.
 		return normalizeTimestampParam(string(raw))
+	}
+	if v, ok := decodeTypedParam(oid, raw); ok {
+		return v
 	}
 	switch len(raw) {
 	case 8:
