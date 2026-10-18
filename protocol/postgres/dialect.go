@@ -59,6 +59,7 @@ func rewrite(sql string) string {
 	sql = rewriteMatchOperators(sql)
 	sql = rewriteILike(sql)
 	sql = rewriteRowLock(sql)
+	sql = rewriteOffset(sql)        // bare OFFSET -> LIMIT -1 OFFSET, after FOR UPDATE is gone
 	sql = rewriteKeywordLabels(sql) // last: earlier rules write AS of their own (CAST)
 	return sql
 }
