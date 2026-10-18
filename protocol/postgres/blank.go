@@ -14,6 +14,21 @@ import "strings"
 // isBlankStatement reports whether sql contains nothing executable: only
 // whitespace, semicolons and comments.
 func isBlankStatement(sql string) bool {
+	return executableStart(sql) == len(sql)
+}
+
+// stripLeadingComments drops the whitespace, semicolons and comments in front
+// of a statement. Everything that routes a statement looks at its first words
+// (CREATE SCHEMA, ALTER TABLE … ADD CONSTRAINT, BEGIN, SET …), and migration
+// tools put a comment above each one — Prisma writes `-- CreateSchema` over
+// CREATE SCHEMA — which would otherwise send the statement to SQLite as is.
+func stripLeadingComments(sql string) string {
+	return sql[executableStart(sql):]
+}
+
+// executableStart returns the index of the first character that is not
+// whitespace, a semicolon or part of a comment, or len(sql) when there is none.
+func executableStart(sql string) int {
 	i := 0
 	for i < len(sql) {
 		c := sql[i]
@@ -27,14 +42,14 @@ func isBlankStatement(sql string) bool {
 			if !closed {
 				// Unterminated: let the parser reject it, as Postgres does,
 				// rather than passing it off as an empty statement.
-				return false
+				return i
 			}
 			i = j
 		default:
-			return false
+			return i
 		}
 	}
-	return true
+	return i
 }
 
 // skipLineComment returns the index of the newline ending the `--` comment at

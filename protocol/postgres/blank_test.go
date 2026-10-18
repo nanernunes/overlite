@@ -40,3 +40,20 @@ func TestIsBlankStatement(t *testing.T) {
 		}
 	}
 }
+
+func TestStripLeadingComments(t *testing.T) {
+	cases := map[string]string{
+		"SELECT 1":                         "SELECT 1",
+		"-- CreateSchema\nCREATE SCHEMA x": "CREATE SCHEMA x",
+		"/* a */ /* b */ BEGIN":            "BEGIN",
+		" -- one\n /* two */ ; SELECT 1":   "SELECT 1",
+		"SELECT 1 -- trailing":             "SELECT 1 -- trailing",
+		"/* unterminated":                  "/* unterminated",
+		"-- only":                          "",
+	}
+	for in, want := range cases {
+		if got := stripLeadingComments(in); got != want {
+			t.Errorf("stripLeadingComments(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

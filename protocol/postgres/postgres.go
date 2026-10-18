@@ -390,6 +390,7 @@ func (s *session) handleSimpleQuery(body []byte) error {
 	if isBlankStatement(sql) {
 		return s.c.send(msgEmptyQuery, nil)
 	}
+	sql = stripLeadingComments(sql)
 
 	// Transaction control is handled by the session (real BEGIN/COMMIT/ROLLBACK).
 	if kind := txControlKind(sql); kind != "" {
