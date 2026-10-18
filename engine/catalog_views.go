@@ -192,8 +192,14 @@ const pgSequenceClassTmpl = `SELECT CAST(seq.rowid + 80000000 + @OFF@ AS INTEGER
  1, 0,0,0,0,0,0,1,'d',0,NULL,NULL,NULL,0,0
 FROM _overlite_sequences seq`
 
+// A table or view has a row type of its own in Postgres, and introspection
+// tells relations from indexes and sequences by it (Prisma's column query keeps
+// only `reltype > 0`). The type isn't modeled in pg_type; its oid only has to be
+// non-zero and distinct, so it is the relation's rowid in a range of its own.
 const pgClassTmpl = `SELECT CAST(m.rowid + @OFF@ AS INTEGER) AS oid, substr(m.name,@PLEN@) AS relname, @NS@ AS relnamespace,
- 0 AS reltype, 0 AS reloftype, 10 AS relowner, 0 AS relam, 0 AS relfilenode, 0 AS reltablespace,
+ CASE WHEN m.type='index' THEN 0 ELSE CAST(m.rowid + 60000000 + @OFF@ AS INTEGER) END AS reltype,
+ 0 AS reloftype, 10 AS relowner, CASE WHEN m.type='index' THEN 403 ELSE 0 END AS relam,
+ 0 AS relfilenode, 0 AS reltablespace,
  0 AS relpages, 0 AS reltuples, 0 AS relallvisible, 0 AS reltoastrelid,
  CASE WHEN m.type='table' AND (EXISTS(SELECT 1 FROM pragma_index_list(m.name,'@DB@'))
        OR EXISTS(SELECT 1 FROM pragma_table_info(m.name,'@DB@') WHERE pk>0)) THEN 1 ELSE 0 END AS relhasindex,
@@ -212,7 +218,7 @@ const pgClassTmpl = `SELECT CAST(m.rowid + @OFF@ AS INTEGER) AS oid, substr(m.na
 FROM @MASTER@ m
 WHERE m.type IN ('table','view','index') AND m.name NOT LIKE 'sqlite_%' AND m.name NOT GLOB '_overlite_*'
 UNION ALL
-SELECT CAST(tbl.rowid + 90000000 + @OFF@ AS INTEGER), substr(tbl.name,@PLEN@) || '_pkey', @NS@, 0,0,10,403,0,0,0,0,0,0,0,0,'p','i',
+SELECT CAST(tbl.rowid + 90000000 + @OFF@ AS INTEGER), ` + pkNameExpr + `, @NS@, 0,0,10,403,0,0,0,0,0,0,0,0,'p','i',
  (SELECT count(*) FROM pragma_table_info(tbl.name,'@DB@') WHERE pk>0),
  0,0,0,0,0,0,1,'n',0,NULL,NULL,NULL,0,0
 FROM @MASTER@ tbl
@@ -226,7 +232,8 @@ const pgAttributeTmpl = `SELECT CAST(m.rowid + @OFF@ AS INTEGER) AS attrelid, ti
              WHERE typname = t.typname ORDER BY sortorder))
           = overlite_enum_labels((SELECT sql FROM @MASTER@ WHERE name = m.name), ti.name)),
   overlite_type_oid(ti.type)) AS atttypid,
- -1 AS attstattarget, -1 AS attlen, ti.cid + 1 AS attnum, 0 AS attndims, -1 AS attcacheoff, -1 AS atttypmod,
+ -1 AS attstattarget, -1 AS attlen, ti.cid + 1 AS attnum, 0 AS attndims, -1 AS attcacheoff,
+ overlite_typmod(ti.type) AS atttypmod,
  0 AS attbyval, 'p' AS attstorage, 'i' AS attalign,
  CASE WHEN ti."notnull"=1 OR ti.pk>0 THEN 1 ELSE 0 END AS attnotnull,
  CASE WHEN ti.dflt_value IS NOT NULL THEN 1 ELSE 0 END AS atthasdef,
@@ -251,7 +258,10 @@ const pgIndexTmpl = `SELECT idx.rowid + @OFF@ AS indexrelid, tbl.rowid + @OFF@ A
  0 AS indisexclusion, 1 AS indimmediate, 0 AS indisclustered, 1 AS indisvalid, 0 AS indcheckxmin,
  1 AS indisready, 1 AS indislive, 0 AS indisreplident,
  (SELECT group_concat(ii.cid+1,' ') FROM pragma_index_info(idx.name,'@DB@') ii) AS indkey,
- '' AS indcollation, '' AS indclass, '' AS indoption, NULL AS indexprs, NULL AS indpred,
+ '' AS indcollation,
+ (SELECT group_concat(` + indexColOpclassExpr + `,' ') FROM pragma_index_info(idx.name,'@DB@') ii) AS indclass,
+ (SELECT group_concat(CASE WHEN x."desc" THEN 3 ELSE 0 END,' ') FROM pragma_index_xinfo(idx.name,'@DB@') x WHERE x.key) AS indoption,
+ NULL AS indexprs, NULL AS indpred,
  (SELECT group_concat(ii.name,', ') FROM pragma_index_info(idx.name,'@DB@') ii) AS ov_cols
 FROM @MASTER@ idx
 JOIN @MASTER@ tbl ON tbl.name = idx.tbl_name AND tbl.type='table'
@@ -262,8 +272,11 @@ SELECT tbl.rowid + 90000000 + @OFF@, tbl.rowid + @OFF@,
  (SELECT count(*) FROM pragma_table_info(tbl.name,'@DB@') WHERE pk>0),
  (SELECT count(*) FROM pragma_table_info(tbl.name,'@DB@') WHERE pk>0),
  1,1,0,1,0,1,0,1,1,0,
- (SELECT group_concat(cid+1,' ') FROM pragma_table_info(tbl.name,'@DB@') WHERE pk>0 ORDER BY pk),
- '','','',NULL,NULL,
+ (SELECT group_concat(cid+1,' ') FROM (SELECT cid FROM pragma_table_info(tbl.name,'@DB@') WHERE pk>0 ORDER BY pk)),
+ '',
+ (SELECT group_concat(` + pkColOpclassExpr + `,' ') FROM (SELECT cid FROM pragma_table_info(tbl.name,'@DB@') WHERE pk>0 ORDER BY pk) pk),
+ (SELECT group_concat(0,' ') FROM pragma_table_info(tbl.name,'@DB@') WHERE pk>0),
+ NULL,NULL,
  (SELECT group_concat(name,', ') FROM pragma_table_info(tbl.name,'@DB@') WHERE pk>0 ORDER BY pk)
 FROM @MASTER@ tbl
 WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%' AND tbl.name NOT GLOB '_overlite_*'
@@ -274,25 +287,39 @@ SELECT CAST(tbl.rowid*1000 + il.seq + 84000000 + @OFF@ AS INTEGER), tbl.rowid + 
  (SELECT count(*) FROM pragma_index_info(il.name,'@DB@')),
  1,0,0,1,0,1,0,1,1,0,
  (SELECT group_concat(ii.cid+1,' ') FROM pragma_index_info(il.name,'@DB@') ii),
- '','','',NULL,NULL,
+ '',
+ (SELECT group_concat(` + indexColOpclassExpr + `,' ') FROM pragma_index_info(il.name,'@DB@') ii),
+ (SELECT group_concat(0,' ') FROM pragma_index_info(il.name,'@DB@') ii),
+ NULL,NULL,
  (SELECT group_concat(ii.name,', ') FROM pragma_index_info(il.name,'@DB@') ii)
 FROM @MASTER@ tbl JOIN pragma_index_list(tbl.name,'@DB@') il
 WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%' AND tbl.name NOT GLOB '_overlite_*'
   AND il.origin='u' AND il."unique"=1`
 
-const pgConstraintTmpl = `SELECT tbl.rowid*100000 + fk.id + @OFF@ AS oid, 'fk_' || substr(tbl.name,@PLEN@) || '_' || fk.id AS conname,
+const pgConstraintTmpl = `SELECT tbl.rowid*100000 + fk.id + @OFF@ AS oid, ` + fkNameExpr + ` AS conname,
  @NS@ AS connamespace, 'f' AS contype, 0 AS condeferrable, 0 AS condeferred, 1 AS convalidated,
  CAST(tbl.rowid + @OFF@ AS INTEGER) AS conrelid, 0 AS contypid, 0 AS conindid, 0 AS conparentid,
  CAST((SELECT rowid + @OFF@ FROM @MASTER@ WHERE name = fk."table" AND type='table') AS INTEGER) AS confrelid,
- 'a' AS confupdtype, 'a' AS confdeltype, 's' AS confmatchtype, 1 AS conislocal, 0 AS coninhcount,
- 1 AS connoinherit, '' AS conkey, '' AS confkey, NULL AS conbin,
- fk."from" AS ov_cols, fk."table" || '(' || fk."to" || ')' AS ov_ref
+ ` + fkUpdateActionExpr + ` AS confupdtype, ` + fkDeleteActionExpr + ` AS confdeltype,
+ 's' AS confmatchtype, 1 AS conislocal, 0 AS coninhcount, 1 AS connoinherit,
+ (SELECT json_group_array((SELECT ti.cid + 1 FROM pragma_table_info(tbl.name,'@DB@') ti WHERE ti.name = k."from"))
+    FROM (SELECT "from" FROM pragma_foreign_key_list(tbl.name,'@DB@') WHERE id = fk.id ORDER BY seq) k) AS conkey,
+ (SELECT json_group_array((SELECT ti.cid + 1 FROM pragma_table_info(fk."table",'@DB@') ti
+                           WHERE ti.name = k."to" OR (k."to" IS NULL AND ti.pk = k.seq + 1)))
+    FROM (SELECT "to", seq FROM pragma_foreign_key_list(tbl.name,'@DB@') WHERE id = fk.id ORDER BY seq) k) AS confkey,
+ NULL AS conbin,
+ (SELECT group_concat(quote_ident("from"), ', ') FROM (SELECT "from" FROM pragma_foreign_key_list(tbl.name,'@DB@') WHERE id = fk.id ORDER BY seq)) AS ov_cols,
+ quote_ident(fk."table") || '(' || (SELECT group_concat(quote_ident("to"), ', ') FROM (SELECT "to" FROM pragma_foreign_key_list(tbl.name,'@DB@') WHERE id = fk.id ORDER BY seq)) || ')' ||
+ CASE fk.on_update WHEN 'NO ACTION' THEN '' ELSE ' ON UPDATE ' || fk.on_update END ||
+ CASE fk.on_delete WHEN 'NO ACTION' THEN '' ELSE ' ON DELETE ' || fk.on_delete END AS ov_ref
 FROM @MASTER@ tbl JOIN pragma_foreign_key_list(tbl.name,'@DB@') fk
-WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%' AND tbl.name NOT GLOB '_overlite_*'
+WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%' AND tbl.name NOT GLOB '_overlite_*' AND fk.seq = 0
 UNION ALL
-SELECT tbl.rowid*100000 + 99999 + @OFF@, substr(tbl.name,@PLEN@) || '_pkey', @NS@, 'p', 0,0,1,
+SELECT tbl.rowid*100000 + 99999 + @OFF@, ` + pkNameExpr + `, @NS@, 'p', 0,0,1,
  CAST(tbl.rowid + @OFF@ AS INTEGER), 0, CAST(tbl.rowid + 90000000 + @OFF@ AS INTEGER), 0, 0,
- ' ',' ',' ', 1,0,1, '','',NULL,
+ ' ',' ',' ', 1,0,1,
+ (SELECT json_group_array(cid + 1) FROM (SELECT cid FROM pragma_table_info(tbl.name,'@DB@') WHERE pk>0 ORDER BY pk)),
+ NULL,NULL,
  (SELECT group_concat(name,', ') FROM pragma_table_info(tbl.name,'@DB@') WHERE pk>0 ORDER BY pk), NULL
 FROM @MASTER@ tbl
 WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%' AND tbl.name NOT GLOB '_overlite_*'
@@ -301,7 +328,8 @@ UNION ALL
 SELECT tbl.rowid*100000 + 88000 + il.seq + @OFF@,
  substr(tbl.name,@PLEN@) || '_' || (SELECT ii.name FROM pragma_index_info(il.name,'@DB@') ii WHERE ii.seqno=0) || '_key', @NS@, 'u', 0,0,1,
  CAST(tbl.rowid + @OFF@ AS INTEGER), 0, CAST(tbl.rowid*1000 + il.seq + 84000000 + @OFF@ AS INTEGER), 0, 0,
- ' ',' ',' ', 1,0,1, '','',NULL,
+ ' ',' ',' ', 1,0,1,
+ (SELECT json_group_array(ii.cid + 1) FROM pragma_index_info(il.name,'@DB@') ii), NULL, NULL,
  (SELECT group_concat(ii.name,', ') FROM pragma_index_info(il.name,'@DB@') ii), NULL
 FROM @MASTER@ tbl JOIN pragma_index_list(tbl.name,'@DB@') il
 WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%' AND tbl.name NOT GLOB '_overlite_*'
@@ -337,9 +365,9 @@ const infoColumnsTmpl = `SELECT @DBNAME@ AS table_catalog, '@PG@' AS table_schem
  format_type(overlite_type_oid(ti.type), NULL) AS data_type,
  overlite_char_max_length(ti.type) AS character_maximum_length, NULL AS character_octet_length,
  overlite_numeric_precision(ti.type) AS numeric_precision,
- CASE WHEN overlite_numeric_precision(ti.type) IS NOT NULL THEN 10 END AS numeric_precision_radix,
+ overlite_numeric_precision_radix(ti.type) AS numeric_precision_radix,
  overlite_numeric_scale(ti.type) AS numeric_scale,
- NULL AS datetime_precision,
+ overlite_datetime_precision(ti.type) AS datetime_precision,
  @DBNAME@ AS udt_catalog, 'pg_catalog' AS udt_schema,
  -- udt_name is the pg_type name (int4, timestamp), not the SQL standard
  -- spelling that data_type carries. Clients join information_schema.columns to
@@ -357,18 +385,18 @@ FROM @MASTER@ m JOIN pragma_table_info(m.name,'@DB@') ti
 WHERE m.type='table' AND m.name NOT LIKE 'sqlite_%' AND m.name NOT GLOB '_overlite_*'`
 
 // The constraint-family views are derived from SQLite pragmas. Constraint names
-// match pg_constraint: "<table>_pkey" for the primary key, "fk_<table>_<id>" for
-// a foreign key, and the index name for a UNIQUE constraint.
+// match pg_constraint: the names the DDL gave the primary and foreign keys (or
+// Postgres' defaults for them), and the index name for a UNIQUE constraint.
 
 const infoTableConstraintsTmpl = `SELECT @DBNAME@ AS constraint_catalog, '@PG@' AS constraint_schema,
- tbl.name || '_pkey' AS constraint_name, @DBNAME@ AS table_catalog, '@PG@' AS table_schema,
+ ` + pkNameExpr + ` AS constraint_name, @DBNAME@ AS table_catalog, '@PG@' AS table_schema,
  tbl.name AS table_name, 'PRIMARY KEY' AS constraint_type, 'NO' AS is_deferrable,
  'NO' AS initially_deferred, 'YES' AS enforced
 FROM @MASTER@ tbl
 WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%' AND tbl.name NOT GLOB '_overlite_*'
   AND EXISTS(SELECT 1 FROM pragma_table_info(tbl.name,'@DB@') WHERE pk>0)
 UNION ALL
-SELECT 'main', '@PG@', 'fk_' || tbl.name || '_' || fk.id, 'main', '@PG@', tbl.name,
+SELECT 'main', '@PG@', ` + fkNameExpr + `, 'main', '@PG@', tbl.name,
  'FOREIGN KEY', 'NO', 'NO', 'YES'
 FROM @MASTER@ tbl JOIN pragma_foreign_key_list(tbl.name,'@DB@') fk
 WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%' AND tbl.name NOT GLOB '_overlite_*' AND fk.seq=0
@@ -381,13 +409,13 @@ WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%' AND tbl.name NOT GLOB '_
   AND il.origin='u' AND il."unique"=1`
 
 const infoKeyColumnUsageTmpl = `SELECT @DBNAME@ AS constraint_catalog, '@PG@' AS constraint_schema,
- tbl.name || '_pkey' AS constraint_name, @DBNAME@ AS table_catalog, '@PG@' AS table_schema,
+ ` + pkNameExpr + ` AS constraint_name, @DBNAME@ AS table_catalog, '@PG@' AS table_schema,
  tbl.name AS table_name, ti.name AS column_name, ti.pk AS ordinal_position,
  NULL AS position_in_unique_constraint
 FROM @MASTER@ tbl JOIN pragma_table_info(tbl.name,'@DB@') ti
 WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%' AND tbl.name NOT GLOB '_overlite_*' AND ti.pk>0
 UNION ALL
-SELECT 'main', '@PG@', 'fk_' || tbl.name || '_' || fk.id, 'main', '@PG@', tbl.name,
+SELECT 'main', '@PG@', ` + fkNameExpr + `, 'main', '@PG@', tbl.name,
  fk."from", fk.seq+1, fk.seq+1
 FROM @MASTER@ tbl JOIN pragma_foreign_key_list(tbl.name,'@DB@') fk
 WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%' AND tbl.name NOT GLOB '_overlite_*'
@@ -401,7 +429,7 @@ WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%' AND tbl.name NOT GLOB '_
   AND il.origin='u' AND il."unique"=1`
 
 const infoReferentialConstraintsTmpl = `SELECT @DBNAME@ AS constraint_catalog, '@PG@' AS constraint_schema,
- 'fk_' || tbl.name || '_' || fk.id AS constraint_name, @DBNAME@ AS unique_constraint_catalog,
+ ` + fkNameExpr + ` AS constraint_name, @DBNAME@ AS unique_constraint_catalog,
  '@PG@' AS unique_constraint_schema, fk."table" || '_pkey' AS unique_constraint_name,
  'NONE' AS match_option, fk.on_update AS update_rule, fk.on_delete AS delete_rule
 FROM @MASTER@ tbl JOIN pragma_foreign_key_list(tbl.name,'@DB@') fk
@@ -409,11 +437,11 @@ WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%' AND tbl.name NOT GLOB '_
 
 const infoConstraintColumnUsageTmpl = `SELECT @DBNAME@ AS table_catalog, '@PG@' AS table_schema,
  tbl.name AS table_name, ti.name AS column_name, @DBNAME@ AS constraint_catalog,
- '@PG@' AS constraint_schema, tbl.name || '_pkey' AS constraint_name
+ '@PG@' AS constraint_schema, ` + pkNameExpr + ` AS constraint_name
 FROM @MASTER@ tbl JOIN pragma_table_info(tbl.name,'@DB@') ti
 WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%' AND tbl.name NOT GLOB '_overlite_*' AND ti.pk>0
 UNION ALL
-SELECT 'main', '@PG@', fk."table", fk."to", 'main', '@PG@', 'fk_' || tbl.name || '_' || fk.id
+SELECT 'main', '@PG@', fk."table", fk."to", 'main', '@PG@', ` + fkNameExpr + `
 FROM @MASTER@ tbl JOIN pragma_foreign_key_list(tbl.name,'@DB@') fk
 WHERE tbl.type='table' AND tbl.name NOT LIKE 'sqlite_%' AND tbl.name NOT GLOB '_overlite_*'`
 
@@ -421,3 +449,28 @@ const infoViewsTmpl = `SELECT @DBNAME@ AS table_catalog, '@PG@' AS table_schema,
  sql AS view_definition, 'NONE' AS check_option, 'NO' AS is_updatable, 'NO' AS is_insertable_into,
  'NO' AS is_trigger_updatable, 'NO' AS is_trigger_deletable, 'NO' AS is_trigger_insertable_into
 FROM @MASTER@ WHERE type='view' AND name NOT LIKE 'sqlite_%' AND name NOT GLOB '_overlite_*'`
+
+// fkNameExpr names the foreign key fk (one pragma_foreign_key_list row of tbl)
+// as constraints.go recovers it; pkNameExpr names tbl's primary key.
+const fkNameExpr = `overlite_fk_name(tbl.sql, substr(tbl.name,@PLEN@),
+ (SELECT group_concat("from", ',') FROM (SELECT "from" FROM pragma_foreign_key_list(tbl.name,'@DB@') WHERE id = fk.id ORDER BY seq)),
+ fk."table")`
+
+const pkNameExpr = `overlite_pk_name(tbl.sql, substr(tbl.name,@PLEN@))`
+
+// fkUpdateActionExpr and fkDeleteActionExpr map SQLite's spelled-out
+// referential actions to pg_constraint's one-letter codes.
+const (
+	fkUpdateActionExpr = `CASE fk.on_update WHEN 'CASCADE' THEN 'c' WHEN 'SET NULL' THEN 'n'
+ WHEN 'SET DEFAULT' THEN 'd' WHEN 'RESTRICT' THEN 'r' ELSE 'a' END`
+	fkDeleteActionExpr = `CASE fk.on_delete WHEN 'CASCADE' THEN 'c' WHEN 'SET NULL' THEN 'n'
+ WHEN 'SET DEFAULT' THEN 'd' WHEN 'RESTRICT' THEN 'r' ELSE 'a' END`
+)
+
+// indexColOpclassExpr is the default operator class of an index column (ii, a
+// pragma_index_info row of tbl); pkColOpclassExpr that of a primary-key column
+// (cid of tbl).
+const (
+	indexColOpclassExpr = `overlite_opclass((SELECT t.type FROM pragma_table_info(tbl.name,'@DB@') t WHERE t.cid = ii.cid))`
+	pkColOpclassExpr    = `overlite_opclass((SELECT t.type FROM pragma_table_info(tbl.name,'@DB@') t WHERE t.cid = pk.cid))`
+)

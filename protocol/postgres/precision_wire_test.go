@@ -46,9 +46,11 @@ func TestColumnPrecision(t *testing.T) {
 	c := get("c") // char(4)
 	assert.Equal(t, int64(4), c.charLen.Int64)
 
-	d := get("d") // int -> nothing
+	d := get("d") // int: 32 binary digits, as Postgres reports it
 	assert.False(t, d.charLen.Valid)
-	assert.False(t, d.numPrec.Valid)
+	assert.Equal(t, int64(32), d.numPrec.Int64)
+	assert.Equal(t, int64(2), d.numRadix.Int64)
+	assert.Equal(t, int64(0), d.numScale.Int64)
 
 	f := get("f") // unqualified numeric -> no fixed precision
 	assert.False(t, f.numPrec.Valid)
