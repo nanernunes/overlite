@@ -551,7 +551,10 @@ func (s *session) handleDescribe(body []byte) error {
 	cols, err := s.describeSQL(descSQL, args)
 	if err != nil {
 		logQueryError("describe", err, prep.sql, prep.sql)
-		return s.protoError("42000", err.Error())
+		// The code the statement would fail with at Execute: a client that
+		// prepares first (tokio-postgres, so Prisma) learns of a missing table
+		// here, and tells it from other errors by 42P01.
+		return s.protoError(sqlState(err), err.Error())
 	}
 	if cols == nil {
 		return s.c.send(msgNoData, nil)
