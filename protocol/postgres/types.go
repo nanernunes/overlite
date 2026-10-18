@@ -106,6 +106,16 @@ var boolCatalogColumns = map[string]bool{
 	"rolcreatedb": true, "rolcanlogin": true, "rolreplication": true,
 	"rolbypassrls":  true,
 	"datistemplate": true, "datallowconn": true,
+	"indnullsnotdistinct": true, "indcheckxmin": true, "conperiod": true,
+	"typisdefined": true, "typispreferred": true, "opcdefault": true, "extrelocatable": true,
+	"tgisinternal": true, "tgdeferrable": true, "tginitdeferred": true,
+	"lanispl": true, "lanpltrusted": true,
+	"proisstrict": true, "proretset": true, "prosecdef": true, "proleakproof": true,
+	// The aliases Prisma's schema introspection gives the booleans it reads; it
+	// refuses a 0/1 where it expects a bool.
+	"is_partition": true, "has_subclass": true, "has_row_level_security": true,
+	"is_unique": true, "is_primary_key": true, "nulls_first": true,
+	"is_deferrable": true, "is_deferred": true, "extension_relocatable": true,
 	// Boolean expression aliases pg_dump reads as t/f (SQLite returns 1/0 for
 	// these computed columns, which have no declared type).
 	"notnull_islocal": true, "notnull_noinherit": true, "notnull_invalidoid": true,

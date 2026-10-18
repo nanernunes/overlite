@@ -13,6 +13,7 @@ func rewrite(sql string) string {
 	// Strip the pg_catalog. qualifier first, so schema-qualified type names in
 	// casts (e.g. "x::pg_catalog.regtype") reduce to a bare, castable type.
 	sql = rewritePgCatalogPrefix(sql)
+	sql = rewriteCatalogBoolLiterals(sql) // relispartition = 'f' -> = 0
 	sql = rewriteDropCascade(sql)
 	sql = rewriteDistinctOn(sql)
 	sql = rewriteSerial(sql)
