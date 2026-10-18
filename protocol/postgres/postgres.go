@@ -574,7 +574,7 @@ func (s *session) handleSimpleQuery(body []byte) error {
 
 	// Expand sequence calls and enum columns on the raw statement, before the
 	// dialect rewrite (see rewriteForExec).
-	rewritten, err := s.rewriteForExec(sql)
+	rewritten, err := s.rewriteForExec(sql, nil)
 	if err != nil {
 		if s.tx != nil {
 			s.txFailed = true

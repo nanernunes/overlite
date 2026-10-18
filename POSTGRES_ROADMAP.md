@@ -46,7 +46,7 @@ part a DBA operates.
 | Multiple concurrent writers | ❌ |
 | `SELECT … FOR UPDATE` / `FOR SHARE` (row locks) | ❌ real semantics · 🔜 accepted as no-op |
 | Configurable isolation levels | ❌ (accepted, no effect) |
-| Advisory locks (`pg_advisory_lock`) | 🔜 |
+| Advisory locks (`pg_advisory_lock` and family, session and transaction level) | ✅ |
 | Deadlock detection | ❌ (nothing to deadlock — writes serialize) |
 
 **Why.** SQLite in WAL mode allows one writer at a time with any number of

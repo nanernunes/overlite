@@ -506,7 +506,7 @@ func (s *session) rlsCheckUpsert(sql string, params []core.Value, bare string) (
 	if clientRet != "" {
 		ret = clientRet + ", " + ret
 	}
-	execSQL, err := s.rewriteForExec(body + " RETURNING " + ret)
+	execSQL, err := s.rewriteForExec(body+" RETURNING "+ret, nil)
 	if err != nil {
 		return true, nil, err
 	}

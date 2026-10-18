@@ -111,6 +111,10 @@ var boolCatalogColumns = map[string]bool{
 	"notnull_islocal": true, "notnull_noinherit": true, "notnull_invalidoid": true,
 	// A sequence read as a relation: is_called is boolean.
 	"is_called": true,
+	// The advisory locks that answer whether they took or let go of one.
+	"pg_try_advisory_lock": true, "pg_try_advisory_lock_shared": true,
+	"pg_try_advisory_xact_lock": true, "pg_try_advisory_xact_lock_shared": true,
+	"pg_advisory_unlock": true, "pg_advisory_unlock_shared": true,
 	// pg_tables / pg_indexes summaries.
 	"hasindexes": true, "hasrules": true, "hastriggers": true, "rowsecurity": true,
 }

@@ -76,6 +76,10 @@ type session struct {
 	pending []pgNotify
 	idle    bool
 	nmu     sync.Mutex
+
+	// txAdvisory holds the advisory locks taken for the current transaction,
+	// let go when it ends.
+	txAdvisory []txAdvisoryHold
 }
 
 type prepared struct {
@@ -148,12 +152,17 @@ func newSession(ctx context.Context, c *wireConn, db core.Session, user string, 
 	}
 }
 
-// rewriteForExec applies the session-level expansions (sequence calls, enum
-// columns) to the raw statement, then the dialect rewrite. The expansions run
-// first so the integer/label literals they inject are protected by the
-// string-literal-aware rewrite.
-func (s *session) rewriteForExec(raw string) (string, error) {
+// rewriteForExec applies the session-level expansions (sequence calls,
+// advisory locks, enum columns) to the raw statement, then the dialect
+// rewrite. The expansions run first so the integer/label literals they inject
+// are protected by the string-literal-aware rewrite. params are the bound
+// values a lock's key may come from.
+func (s *session) rewriteForExec(raw string, params []core.Value) (string, error) {
 	x, err := s.expandSequences(s.expandSessionUser(s.applyRLS(raw)))
+	if err != nil {
+		return "", err
+	}
+	x, err = s.expandAdvisoryLocks(x, params)
 	if err != nil {
 		return "", err
 	}
@@ -250,6 +259,7 @@ func (s *session) endTx(commit bool) error {
 	}
 	tx := s.tx
 	s.tx = nil
+	defer s.releaseTxAdvisoryLocks()
 	failed := s.txFailed
 	s.txFailed = false
 	if commit && !failed {
@@ -267,6 +277,7 @@ func (s *session) loop() error {
 	// and stop receiving notifications.
 	defer func() {
 		unregisterAll(s)
+		releaseAdvisoryLocks(s)
 		if s.tx != nil {
 			_ = s.tx.Rollback()
 			s.tx = nil
@@ -525,10 +536,11 @@ func (s *session) handleDescribe(body []byte) error {
 	}
 
 	descSQL := prep.sql
-	if hasSeqFunc(prep.raw) {
-		// Describe must parse for column types but never advance a sequence;
-		// neutralize the calls to a constant, then rewrite the safe string.
-		descSQL = rewrite(neutralizeSequences(prep.raw))
+	if hasSeqFunc(prep.raw) || hasAdvisoryFunc(prep.raw) {
+		// Describe must parse for column types but never advance a sequence
+		// or take a lock; neutralize the calls to a constant, then rewrite the
+		// safe string.
+		descSQL = rewrite(neutralizeAdvisoryLocks(neutralizeSequences(prep.raw)))
 	}
 	cols, err := s.describeSQL(descSQL, args)
 	if err != nil {
@@ -726,7 +738,7 @@ func (s *session) handleExecute(body []byte) error {
 			s.resetPortal(pt)
 			return s.c.sendCommandComplete(commandTag(rs))
 		}
-		execSQL, err := s.rewriteForExec(raw)
+		execSQL, err := s.rewriteForExec(raw, pt.params)
 		if err != nil {
 			if s.tx != nil {
 				s.txFailed = true
