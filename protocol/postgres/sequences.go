@@ -243,7 +243,7 @@ func (s *session) expandSequences(sql string) (string, error) {
 	case "CREATE", "ALTER", "DROP", "TRUNCATE":
 		return sql, nil
 	}
-	return scanSeqCalls(sql, s.evalSeqFunc)
+	return scanFuncCalls(sql, isSeqFunc, s.evalSeqFunc)
 }
 
 // neutralizeSequences rewrites sequence calls to a constant 0 without advancing
@@ -253,14 +253,15 @@ func neutralizeSequences(sql string) string {
 	if !hasSeqFunc(sql) {
 		return sql
 	}
-	out, _ := scanSeqCalls(sql, func(string, string) (string, error) { return "0", nil })
+	out, _ := scanFuncCalls(sql, isSeqFunc, func(string, string) (string, error) { return "0", nil })
 	return out
 }
 
-// scanSeqCalls walks sql and replaces each top-level nextval/currval/setval/
-// lastval call with replace(fn, args), respecting single-quoted strings so it
-// never rewrites text that merely contains the word.
-func scanSeqCalls(sql string, replace func(fn, args string) (string, error)) (string, error) {
+// scanFuncCalls walks sql and replaces each call of a function match accepts
+// (nextval/currval/setval/lastval, the advisory locks) with replace(fn, args),
+// respecting single-quoted strings so it never rewrites text that merely
+// contains the word.
+func scanFuncCalls(sql string, match func(fn string) bool, replace func(fn, args string) (string, error)) (string, error) {
 	var b strings.Builder
 	for i := 0; i < len(sql); {
 		c := sql[i]
@@ -281,7 +282,7 @@ func scanSeqCalls(sql string, replace func(fn, args string) (string, error)) (st
 			for k < len(sql) && (sql[k] == ' ' || sql[k] == '\t' || sql[k] == '\n' || sql[k] == '\r') {
 				k++
 			}
-			if isSeqFunc(fn) && k < len(sql) && sql[k] == '(' {
+			if match(fn) && k < len(sql) && sql[k] == '(' {
 				args, end, ok := readParenArgs(sql, k)
 				if ok {
 					lit, err := replace(fn, args)

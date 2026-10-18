@@ -60,7 +60,7 @@ func (s *session) handleExecuteSQL(sql string) error {
 	}
 	final := substituteParams(query, args)
 
-	rewritten, err := s.rewriteForExec(final)
+	rewritten, err := s.rewriteForExec(final, nil)
 	if err != nil {
 		return s.sendExecError(err)
 	}
