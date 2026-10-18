@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"overlite/core"
 )
@@ -237,7 +238,7 @@ func (d *Dir) CreateDatabase(ctx context.Context, database string) error {
 }
 
 // DropDatabase closes the database and deletes its files.
-func (d *Dir) DropDatabase(_ context.Context, database string) error {
+func (d *Dir) DropDatabase(ctx context.Context, database string) error {
 	if database == MaintenanceDatabase {
 		return fmt.Errorf("cannot drop the maintenance database %q", MaintenanceDatabase)
 	}
@@ -249,12 +250,11 @@ func (d *Dir) DropDatabase(_ context.Context, database string) error {
 		return fmt.Errorf("database %q does not exist", database)
 	}
 
-	d.mu.Lock()
+	if err := d.lockIdle(ctx, database); err != nil {
+		return err
+	}
 	defer d.mu.Unlock()
 	if e, ok := d.open[database]; ok {
-		if e.refs > 0 {
-			return fmt.Errorf("database %q is being accessed by other users", database)
-		}
 		e.eng.Close()
 		delete(d.open, database)
 	}
@@ -266,6 +266,35 @@ func (d *Dir) DropDatabase(_ context.Context, database string) error {
 		}
 	}
 	return nil
+}
+
+// dropWait is how long a DROP DATABASE waits for the database's last clients
+// to go, as Postgres waits for their backends to exit.
+const dropWait = 5 * time.Second
+
+// lockIdle takes d.mu once nobody holds database open, waiting up to dropWait
+// for the holders to leave. A client that has just disconnected is still
+// counted until its connection is torn down, and a migration tool drops its
+// shadow database the moment it lets go of it: Prisma's migrate dev failed
+// every so often with the drop refused.
+func (d *Dir) lockIdle(ctx context.Context, database string) error {
+	deadline := time.Now().Add(dropWait)
+	for {
+		d.mu.Lock()
+		e, ok := d.open[database]
+		if !ok || e.refs == 0 {
+			return nil
+		}
+		d.mu.Unlock()
+		if time.Now().After(deadline) {
+			return fmt.Errorf("database %q is being accessed by other users", database)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
 }
 
 func (d *Dir) Close() error {

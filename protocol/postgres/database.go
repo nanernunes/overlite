@@ -15,6 +15,25 @@ func isDatabaseDDL(sql string) bool {
 	return (w == "CREATE" || w == "DROP") && secondWordUpper(sql) == "DATABASE"
 }
 
+// databaseDDLState is the SQLSTATE for a failed CREATE/DROP DATABASE. Clients
+// act on it: Prisma reads 42P04 as "the database already exists", which made a
+// refused DROP of its shadow database read as a failed CREATE.
+func databaseDDLState(err error) string {
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "already exists"):
+		return "42P04" // duplicate_database
+	case strings.Contains(msg, "does not exist"):
+		return "3D000" // invalid_catalog_name
+	case strings.Contains(msg, "being accessed by other users"),
+		strings.Contains(msg, "cannot drop the currently open database"):
+		return "55006" // object_in_use
+	case strings.Contains(msg, "invalid database name"):
+		return "42602" // invalid_name
+	}
+	return sqlState(err)
+}
+
 // tryDatabaseDDL runs a CREATE/DROP DATABASE, returning the command tag.
 func (s *session) tryDatabaseDDL(sql string) (tag string, handled bool, err error) {
 	if !isDatabaseDDL(sql) {

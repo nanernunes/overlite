@@ -546,7 +546,7 @@ func (s *session) handleSimpleQuery(body []byte) error {
 			if s.tx != nil {
 				s.txFailed = true
 			}
-			return s.c.sendError("42P04", err.Error())
+			return s.c.sendError(databaseDDLState(err), err.Error())
 		}
 		if err := s.refreshDatabaseList(); err != nil {
 			return err

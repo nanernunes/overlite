@@ -612,7 +612,7 @@ func (s *session) handleExecute(body []byte) error {
 	if pt.prep.databaseDDL != "" {
 		tag, _, err := s.tryDatabaseDDL(pt.prep.databaseDDL)
 		if err != nil {
-			return s.protoError("42P04", err.Error())
+			return s.protoError(databaseDDLState(err), err.Error())
 		}
 		if err := s.refreshDatabaseList(); err != nil {
 			return err
