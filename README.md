@@ -39,15 +39,19 @@ psql "postgresql://postgres@localhost:5432/postgres?sslmode=disable"
 ### Docker
 
 ```sh
-$ touch postgres.db
-$ docker run --rm -p 5432:5432 -v "$(pwd)/postgres.db:/data/postgres.db" nanernunes/overlite postgres.db
+$ docker run --rm -p 5432:5432 -v "$(pwd)/data:/data" nanernunes/overlite postgres.db
 ```
 
-`touch` first so Docker mounts a file rather than creating a directory in its
-place — an empty file is already a valid empty SQLite database. The image binds
-`0.0.0.0` inside the container and writes straight through to the file you
-mounted, so `postgres.db` stays a plain SQLite file on the host. Podman needs
-`:Z` on the mount for SELinux to allow that write.
+Mount the **directory**, not the file. SQLite writes recent commits to
+`postgres.db-wal` beside the database and checkpoints them into `postgres.db`
+later; with only the file mounted, the `-wal` lands in the container's own
+layer, and recreating the container throws away whatever had not been
+checkpointed yet. The same goes for every database `CREATE DATABASE` writes
+next to it (see [Many databases](#many-databases)).
+
+The file is created if it isn't there, and stays a plain SQLite file on the
+host. The image binds `0.0.0.0` inside the container. Podman needs `:Z` on the
+mount for SELinux to allow writing to it.
 
 ### compose.yaml
 
@@ -59,11 +63,10 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - ./postgres.db:/data/postgres.db
+      - ./data:/data
 ```
 
 ```sh
-$ touch postgres.db
 $ docker compose up
 ```
 

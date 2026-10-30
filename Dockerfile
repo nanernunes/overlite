@@ -18,8 +18,9 @@ RUN GOOS=$TARGETOS GOARCH=$TARGETARCH \
 
 FROM scratch
 COPY --from=build /overlite /overlite
-# The database lives here, so `-v ./sample.db:/data/sample.db` lands next to the
-# working directory and a bare file name on the command line resolves to it.
+# The databases live here: mount a host directory on it (`-v ./data:/data`), so
+# a bare file name on the command line resolves into it and the -wal and -shm
+# files SQLite keeps beside each database land on the host too.
 WORKDIR /data
 EXPOSE 5432
 # 127.0.0.1 inside a container is reachable only from the container itself, so
