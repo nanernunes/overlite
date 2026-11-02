@@ -654,7 +654,7 @@ func sqliteTypeOID(decl string) int64 {
 		return typeOIDVarchar
 	case strings.Contains(d, "CHAR"), strings.Contains(d, "CLOB"), strings.Contains(d, "TEXT"):
 		return typeOIDText
-	case strings.Contains(d, "BLOB"):
+	case strings.Contains(d, "BLOB"), strings.TrimSpace(d) == "BYTEA":
 		return typeOIDBytea
 	case strings.Contains(d, "REAL"), strings.Contains(d, "FLOA"), strings.Contains(d, "DOUB"):
 		return typeOIDFloat8

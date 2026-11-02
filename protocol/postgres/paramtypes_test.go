@@ -35,7 +35,7 @@ func TestParamOID(t *testing.T) {
 		"TIMESTAMPTZ": oidTimestamptz, "TIMESTAMP(3)": oidTimestamp, "DATE": oidDate,
 		"DOUBLE PRECISION": oidFloat8, "UUID": oidUUID, "JSONB": oidJSONB,
 		// Types whose binary form is not read back stay unspecified.
-		"": 0, "text[]": 0, "NUMERIC(10,2) DECIMALTEXT": 0, "BYTEA": 0, "hstore": 0, "INTERVAL": 0, "POINT": 0, "mood": 0,
+		"": 0, "text[]": 0, "NUMERIC(10,2) DECIMALTEXT": 0, "BYTEA": oidBytea, "hstore": 0, "INTERVAL": 0, "POINT": 0, "mood": 0,
 	} {
 		assert.Equal(t, oid, paramOID(decl), decl)
 	}

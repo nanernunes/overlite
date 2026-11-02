@@ -52,6 +52,8 @@ const (
 func strictDeclOID(decl string) (uint32, bool) {
 	d := strings.ToUpper(decl)
 	switch {
+	case strings.TrimSpace(d) == "BYTEA":
+		return oidBytea, true
 	case d == "":
 		return 0, false
 	case strings.Contains(d, "BOOL"):
@@ -227,7 +229,7 @@ func oidFromDeclType(decl string) uint32 {
 	case strings.Contains(d, "CHAR"), strings.Contains(d, "CLOB"),
 		strings.Contains(d, "TEXT"), strings.Contains(d, "STRING"):
 		return oidText
-	case strings.Contains(d, "BLOB"):
+	case strings.Contains(d, "BLOB"), strings.TrimSpace(d) == "BYTEA":
 		return oidBytea
 	case strings.Contains(d, "REAL"), strings.Contains(d, "FLOA"), strings.Contains(d, "DOUB"): // incl. float64
 		return oidFloat8
@@ -360,6 +362,12 @@ func encodeBinary(oid uint32, v core.Value) []byte {
 	case oidBytea:
 		if b, ok := v.([]byte); ok {
 			return b
+		}
+		// Older databases and untyped text binds can contain the wire hex form.
+		if s, ok := v.(string); ok {
+			if b, ok := byteaHex(s); ok {
+				return b
+			}
 		}
 		return []byte(fmt.Sprint(v))
 	case oidJSONB:
