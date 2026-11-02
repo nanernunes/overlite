@@ -1,9 +1,11 @@
 package postgres
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	"overlite/core"
@@ -19,6 +21,8 @@ const (
 // does not know, which is then guessed by its length.
 func decodeTypedParam(oid uint32, raw []byte) (core.Value, bool) {
 	switch oid {
+	case oidBytea:
+		return raw, true
 	case oidText, oidVarchar, oidBpchar, oidName, oidUnknown, oidJSON:
 		return string(raw), true
 	case oidJSONB:
@@ -80,6 +84,15 @@ func decodeTypedParam(oid uint32, raw []byte) (core.Value, bool) {
 		}
 	}
 	return nil, false
+}
+
+func byteaHex(s string) ([]byte, bool) {
+	digits, ok := strings.CutPrefix(s, `\x`)
+	if !ok {
+		return nil, false
+	}
+	b, err := hex.DecodeString(digits)
+	return b, err == nil
 }
 
 // decodeArrayParam reads a one-dimensional binary array into the JSON array

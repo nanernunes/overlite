@@ -901,6 +901,11 @@ func formatFor(fmts []int, i int) int {
 // since unknown parameter types steer clients toward text.
 func decodeParam(format int, oid uint32, raw []byte) core.Value {
 	if format == 0 {
+		if oid == oidBytea {
+			if b, ok := byteaHex(string(raw)); ok {
+				return b
+			}
+		}
 		// A timestamp carrying a zone is stored the way the same value written
 		// as a literal would be: bare UTC, at Postgres' precision. Without
 		// this, how a client sent a value decided how it came back — a driver
