@@ -380,10 +380,32 @@ func operandBefore(sql string, castIdx int) (int, int) {
 			j--
 		}
 		// Include a preceding function name, so CAST(x)::t keeps the CAST.
-		for j > 0 && isOperandChar(sql[j-1]) {
-			j--
+		name := j
+		for name > 0 && isOperandChar(sql[name-1]) {
+			name--
 		}
-		return j, end
+		// An aggregate's FILTER (...) or a window's OVER (...) is not a call:
+		// the operand is the whole expression, count(*) FILTER (...) OVER (...).
+		kw := j
+		for kw > 0 && sql[kw-1] == ' ' {
+			kw--
+		}
+		word := kw
+		for word > 0 && isOperandChar(sql[word-1]) {
+			word--
+		}
+		if w := strings.ToUpper(sql[word:kw]); w == "FILTER" || w == "OVER" {
+			name = word
+			prev := name
+			for prev > 0 && sql[prev-1] == ' ' {
+				prev--
+			}
+			if prev > 0 && sql[prev-1] == ')' {
+				start, _ := operandBefore(sql, prev)
+				return start, end
+			}
+		}
+		return name, end
 	case '\'':
 		j := end - 2
 		for j >= 0 && sql[j] != '\'' {
