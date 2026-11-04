@@ -938,11 +938,24 @@ func decodeParam(format int, oid uint32, raw []byte) core.Value {
 }
 
 // countParams counts positional placeholders: the highest $N index, or the
-// number of bare "?" placeholders, whichever is greater.
+// number of bare "?" placeholders, whichever is greater. A ? or $N inside a
+// string or a quoted identifier is not one: a '(?i)…' pattern, as ~* writes
+// it, made a statement with no parameters ask for one.
 func countParams(sql string) int {
 	max, bare := 0, 0
 	for i := 0; i < len(sql); i++ {
 		switch sql[i] {
+		case '\'', '"':
+			q := sql[i]
+			for i++; i < len(sql); i++ {
+				if sql[i] == q {
+					if i+1 < len(sql) && sql[i+1] == q {
+						i++ // a doubled quote stays inside
+						continue
+					}
+					break
+				}
+			}
 		case '?':
 			bare++
 		case '$':

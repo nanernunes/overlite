@@ -256,6 +256,10 @@ func TestCountParams(t *testing.T) {
 		"SELECT $2, $1":               2, // highest index wins
 		"INSERT INTO t VALUES (?, ?)": 2,
 		"SELECT $1 WHERE a = $1":      1, // reused index counts once
+		"SELECT 'why?'":               0, // inside a string, not a placeholder
+		"SELECT 'it''s $3?', $1":      1,
+		`SELECT "a?b" FROM t`:         0,
+		"SELECT s REGEXP '(?i)x'":     0, // what ~* writes
 	}
 	for sql, want := range cases {
 		assert.Equalf(t, want, countParams(sql), "countParams(%q)", sql)
