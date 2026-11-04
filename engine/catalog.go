@@ -608,14 +608,15 @@ var registerCatalog = sync.OnceFunc(func() {
 		if len(args) != 2 {
 			return nil, fmt.Errorf("regexp: want 2 args")
 		}
-		re, err := regexp.Compile(fmt.Sprint(args[0]))
+		match, err := compileRegex(fmt.Sprint(args[0]))
 		if err != nil {
 			return nil, err
 		}
-		if re.MatchString(fmt.Sprint(args[1])) {
-			return int64(1), nil
+		ok, err := match(fmt.Sprint(args[1]))
+		if err != nil {
+			return nil, err
 		}
-		return int64(0), nil
+		return boolInt(ok), nil
 	})
 
 	sqlite.RegisterConnectionHook(func(conn sqlite.ExecQuerierContext, dsn string) error {
