@@ -1930,10 +1930,12 @@ func operandAfter(sql string, pos int) (int, int) {
 	}
 }
 
-// injectCaseInsensitive prepends the (?i) flag inside a string-literal pattern.
+// injectCaseInsensitive prepends the (?i) flag to a ~* pattern.
 func injectCaseInsensitive(operand string) string {
 	if len(operand) >= 2 && operand[0] == '\'' && operand[len(operand)-1] == '\'' {
 		return "'(?i)" + operand[1:]
 	}
-	return operand
+	// A pattern bound as a parameter or built by an expression is prefixed
+	// when it is evaluated; left as it was, ~* $1 matched case-sensitively.
+	return "('(?i)' || " + operand + ")"
 }

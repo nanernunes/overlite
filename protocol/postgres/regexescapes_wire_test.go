@@ -53,4 +53,11 @@ func TestRegexEscapes(t *testing.T) {
 	require.NoError(t, conn.QueryRow(ctx, `SELECT count(*) FROM d WHERE s !~* '\mvinil\M'`).Scan(&n))
 	assert.Equal(t, 2, n)
 
+	// A pattern bound as a parameter is case-insensitive under ~* too.
+	require.NoError(t, conn.QueryRow(ctx, `SELECT count(*) FROM d WHERE s ~* $1`, `\mvinil\M`).Scan(&n))
+	assert.Equal(t, 1, n, "~* with a parameter")
+	require.NoError(t, conn.QueryRow(ctx, `SELECT count(*) FROM d WHERE s !~* $1`, `vinil`).Scan(&n))
+	assert.Equal(t, 1, n, "!~* with a parameter")
+	require.NoError(t, conn.QueryRow(ctx, `SELECT count(*) FROM d WHERE s ~ $1`, `vinil`).Scan(&n))
+	assert.Equal(t, 1, n, "~ stays case-sensitive")
 }
