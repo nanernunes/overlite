@@ -32,6 +32,7 @@ const table = `((?:"[^"]+"|\w+)(?:\s*\.\s*(?:"[^"]+"|\w+))?)`
 
 var (
 	insertInto   = regexp.MustCompile(`(?is)^\s*INSERT\s+INTO\s+` + table + `\s*\(([^)]*)\)\s*VALUES\s*`)
+	insertBare   = regexp.MustCompile(`(?is)^\s*INSERT\s+INTO\s+` + table + `\s+VALUES\s*`)
 	updateTable  = regexp.MustCompile(`(?is)^\s*UPDATE\s+(?:ONLY\s+)?` + table + `\s+(?:AS\s+\w+\s+)?SET\s`)
 	deleteFrom   = regexp.MustCompile(`(?is)^\s*DELETE\s+FROM\s+(?:ONLY\s+)?` + table + `(?:\s+(?:AS\s+)?\w+)?\s+WHERE\s`)
 	selectFrom   = regexp.MustCompile(`(?is)^\s*SELECT\s.*?\sFROM\s+` + table + `(?:\s+(?:AS\s+)?\w+)?\s+WHERE\s`)
@@ -96,6 +97,15 @@ func (s *session) paramTypes(sql string, n int, declared []uint32) []uint32 {
 	}
 	if tbl, cols, anys := paramColumns(sql); tbl != "" {
 		types := s.columnTypes(tbl)
+		if positional, ok := insertPositions(sql); ok {
+			// INSERT INTO t VALUES (...) fills the columns in their order.
+			order := s.columnOrder(tbl)
+			for n, pos := range positional {
+				if pos < len(order) {
+					cols[n] = order[pos]
+				}
+			}
+		}
 		for i, col := range cols {
 			if i >= 1 && i <= n && oids[i-1] == 0 {
 				oids[i-1] = paramOID(types[strings.ToLower(col)])
@@ -185,6 +195,9 @@ func paramColumns(sql string) (string, map[int]string, map[int]string) {
 		}
 		return tbl, cols, nil
 	}
+	if m := insertBare.FindStringSubmatch(sql); m != nil {
+		return m[1], cols, nil // filled by position, in paramTypes
+	}
 	var tbl string
 	for _, re := range []*regexp.Regexp{updateTable, deleteFrom, selectFrom} {
 		if m := re.FindStringSubmatch(sql); m != nil {
@@ -196,6 +209,45 @@ func paramColumns(sql string) (string, map[int]string, map[int]string) {
 		return "", nil, nil
 	}
 	return tbl, comparedParams(sql, compared), comparedParams(sql, comparedAny)
+}
+
+// insertPositions is, for an INSERT with no column list, the position in the
+// row of each parameter that is a whole value, by its number.
+func insertPositions(sql string) (map[int]int, bool) {
+	m := insertBare.FindStringSubmatchIndex(sql)
+	if m == nil {
+		return nil, false
+	}
+	out := map[int]int{}
+	for _, tuple := range tuples(sql[m[1]:]) {
+		for i, item := range splitTop(tuple) {
+			if p := placeholder.FindStringSubmatch(strings.TrimSpace(item)); p != nil {
+				n, _ := strconv.Atoi(p[1])
+				out[n] = i
+			}
+		}
+	}
+	return out, true
+}
+
+// columnOrder is a table's column names, lowercase, in declaration order.
+func (s *session) columnOrder(tbl string) []string {
+	parts := strings.Split(tbl, ".")
+	name := unquote(parts[len(parts)-1])
+	if len(parts) == 2 && !strings.EqualFold(unquote(parts[0]), "public") {
+		return nil
+	}
+	rs, err := s.exec("SELECT name FROM pragma_table_info("+sqlStr(name)+") ORDER BY cid", nil)
+	if err != nil || rs == nil {
+		return nil
+	}
+	out := make([]string, 0, len(rs.Rows))
+	for _, row := range rs.Rows {
+		if len(row) == 1 {
+			out = append(out, strings.ToLower(asString(row[0])))
+		}
+	}
+	return out
 }
 
 // columnTypes is a table's declared column types, by lowercase name.

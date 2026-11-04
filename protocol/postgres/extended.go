@@ -89,6 +89,10 @@ type prepared struct {
 	// paramOIDs is each parameter's type: the client's from Parse, then the
 	// ones Describe advertised. Bind reads binary parameters by it.
 	paramOIDs []uint32
+	// bindOIDs is each parameter's type as Bind infers it, for the ones a
+	// client sends as text without a type (see coerceTextBools); computed
+	// on first need.
+	bindOIDs []uint32
 	// resultOIDs are the row types Describe advertised for the statement;
 	// Execute encodes its rows by them (see describedOIDs).
 	resultOIDs []uint32
@@ -477,6 +481,9 @@ func (s *session) handleBind(body []byte) error {
 			oid = oids[i]
 		}
 		params[i] = decodeParam(formatFor(fmts, i), oid, r.bytes(length))
+	}
+	if prep := s.prepared[stmtName]; prep != nil && r.err == nil {
+		s.coerceTextBools(prep, fmts, params)
 	}
 
 	nResFmt := r.int16()
