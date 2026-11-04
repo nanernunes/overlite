@@ -50,6 +50,7 @@ func rewrite(sql string) string {
 	sql = rewriteArrayCast(sql)     // '{…}'::type[] -> JSON literal (after unnest)
 	sql = rewriteArrayCastDrop(sql) // expr::type[] -> expr (value already JSON)
 	sql = rewriteCasts(sql)
+	sql = rewriteBoolCasts(sql)    // CAST(x AS boolean) -> pg_bool(x), after :: became CAST
 	sql = rewriteJSONContains(sql) // after casts, so "x::jsonb @> ..." operands are whole
 	sql = rewriteOverlaps(sql)     // "a && b" range/array overlap
 	sql = rewriteJSONExists(sql)   // ? / ?| / ?& -> jsonb_exists*(), after arrays are json_array(…)

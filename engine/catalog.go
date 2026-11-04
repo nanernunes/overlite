@@ -12,8 +12,18 @@ import (
 	"strings"
 	"sync"
 
+	"overlite/core"
+
 	sqlite "modernc.org/sqlite"
 )
+
+// boolInt is a boolean as SQLite stores one.
+func boolInt(b bool) int64 {
+	if b {
+		return 1
+	}
+	return 0
+}
 
 // arrayAgg accumulates array_agg() values into a Postgres array literal.
 type arrayAgg struct{ vals []string }
@@ -142,6 +152,33 @@ var registerCatalog = sync.OnceFunc(func() {
 	sqlite.MustRegisterFunction("avg", &sqlite.FunctionImpl{
 		NArgs:         1,
 		MakeAggregate: func(sqlite.FunctionContext) (sqlite.AggregateFunction, error) { return &decAgg{avg: true}, nil },
+	})
+
+	// pg_bool is what a cast to boolean becomes: SQLite's CAST to the BOOLEAN
+	// affinity reads every word as 0, so 'true'::boolean was false.
+	scalar("pg_bool", 1, func(a []driver.Value) (driver.Value, error) {
+		var s string
+		switch v := a[0].(type) {
+		case nil:
+			return nil, nil
+		case bool:
+			return boolInt(v), nil
+		case int64:
+			return boolInt(v != 0), nil
+		case float64:
+			return boolInt(v != 0), nil
+		case []byte:
+			s = string(v)
+		case string:
+			s = v
+		default:
+			s = fmt.Sprint(v)
+		}
+		b, ok := core.ParseBool(s)
+		if !ok {
+			return nil, fmt.Errorf(`invalid input syntax for type boolean: "%s"`, s)
+		}
+		return boolInt(b), nil
 	})
 
 	scalar("version", 0, func([]driver.Value) (driver.Value, error) {
